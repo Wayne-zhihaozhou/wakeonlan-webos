@@ -96,7 +96,39 @@ powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员�
 | 保存一直「保存中」或提示超时 | 旧版已修：DB 调用带超时+内存缓存、服务启动全程容错、前端回调 `return true`+12s 超时、打开时自检。若仍提示「后台服务无响应」，用 `ares-log` 看 `wol_service.js` 日志，或重启电视/重装。 |
 | 开机不自动唤醒电脑 | 检查 ① 应用里「开机自动发送」是否开 ② 电脑侧 `check-wol-win.ps1` 是否全 OK ③ 服务是否被开机拉起（`ares-log` 看 `service started`）。 |
 
-## 8. 关键文件
+## 8. 编码 / 文件格式避坑（重要，改文件前必读）
+
+本项目文件**默认 UTF-8**，但不同文件对 **BOM（字节序标记）** 的要求不同。改文件前先看下面的规则，否则会出现「能读不能跑」或「看着正常、一运行就乱码/报错」的问题。
+
+| 文件类型 | 必须的编码 | 原因 |
+| --- | --- | --- |
+| `*.ps1`（PowerShell 脚本） | **UTF-8 带 BOM** | Windows PowerShell 5.1（`powershell.exe`）对**不带 BOM** 的 `.ps1` 会按系统 ANSI 代码页（简体中文系统 = GB2312）解析。文件含中文时会被误读：轻则中文乱码，重则某些汉字的字节序列撞上 `"` 等字符，直接**解析失败**（报 `string is missing the terminator: "` / `Missing closing '}'`）。带 BOM 则 5.1 与 7+ 都能正确读。 |
+| `.html` / `.js` / `.css` / `.json` | UTF-8（**不带 BOM** 即可，带也无妨） | 由浏览器/Node 按 UTF-8 读取，不需要 BOM。 |
+| `.md` / `.gitignore` | UTF-8 不带 BOM | 纯文档/配置，按 UTF-8 读取即可。 |
+
+**常见坑（已踩过）：**
+1. 用某些编辑器/工具（或本会话的文件编辑工具）改 `.ps1` 时会把 **BOM 悄悄剥掉**，文件仍是 UTF-8，但 Windows PowerShell 5.1 就解析不了中文了。**改完 `.ps1` 一定要检查首字节是 `EF BB BF`。**
+2. 判断方法：用十六进制看文件开头——带 BOM 应为 `EF BB BF`，不带则直接是 `<`（`3C`）等实际内容。
+3. 用 PowerShell 校验语法（能提前暴露这种问题）：
+   ```powershell
+   $t=$null;$e=$null
+   [System.Management.Automation.Language.Parser]::ParseFile('.\deploy-wakeonlan.ps1',[ref]$t,[ref]$e)
+   if ($e.Count) { $e | % { $_.Message } } else { 'OK: 解析通过' }
+   ```
+   若在 5.1 下报「missing the terminator」，几乎都是 BOM 丢了，补上 BOM 即可。
+4. 给 `.ps1` 补 BOM（PowerShell 一键）：
+   ```powershell
+   $p='.\deploy-wakeonlan.ps1'
+   $b=[IO.File]::ReadAllBytes($p)
+   if(-not($b.Length -ge 3 -and $b[0]-eq 239 -and $b[1]-eq 187 -and $b[2]-eq 191)){
+     [IO.File]::WriteAllBytes($p, ([byte[]](239,187,191) + $b))
+   }
+   ```
+5. 换行符：本项目 `.ps1` 建议保持 **LF**；Git 在 Windows 上可能按 `core.autocrlf` 提示转成 CRLF，属正常告警，不影响功能。别用「改换行符」的方式去「修」乱码。
+
+---
+
+## 9. 关键文件
 | 文件 | 作用 |
 | --- | --- |
 | `deploy-wakeonlan.ps1` | 一键部署脚本（断 VPN 后运行） |
@@ -107,10 +139,10 @@ powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员�
 | `appinfo.json` | 应用元数据 |
 | `dist/` | 打包产物（.ipk，已加入 .gitignore） |
 
-## 9. 说明 / 限制
+## 10. 说明 / 限制
 - 前端用 `PalmServiceBridge` 直接调服务，自包含、无需外部库；服务只用 webOS 预装模块 + Node 内置 `dgram`，无需 npm install。
 - **扫描只能发现当前开机的设备**（电视服务进程不能 ICMP ping，靠 TCP 探测 + ARP 表）；目标电脑关机时扫不到属正常，可手动填 MAC。
 - 「开机自动发送」依赖 webOS 开机自动拉起 JS Service。本机已验证可用；若某固件开机不自动拉起服务，可用 `ares-launch` 启动一次验证链路，再考虑固化开机自启。
 - 发的是**局域网 UDP** 魔术包，外网不可用，需电视与电脑同网。
-- `check-wol-win.ps1` 为 **UTF-8(带 BOM)** 编码（含中文输出）；若用编辑器改过，请保持 BOM，否则 Windows PowerShell 5.1 会因中文乱码报解析错误。
+- `check-wol-win.ps1`、`deploy-wakeonlan.ps1` 均为 **UTF-8(带 BOM)** 编码（含中文输出）；若用编辑器改过，请保持 BOM，否则 Windows PowerShell 5.1 会因中文乱码/解析错误而失败（详见上文「第 8 节 编码/文件格式避坑」）。
 - 默认 MAC `CC:28:AA:A7:B4:1F` 目前**硬编码**为默认值（前端 `DEFAULT_MAC` + 后台 `DEFAULT_CONFIG.mac`），目标电脑若更换需改这两处并重新部署。
