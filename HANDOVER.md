@@ -2,6 +2,9 @@
 
 > 项目路径：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026
 
+## ✅ 当前状态
+**电视已成功通过 WOL 唤醒电脑**（电视点「立即唤醒（测试）」→ 电脑正常开机）。目标电脑有线网卡 MAC 已**硬编码为默认值** `CC:28:AA:A7:B4:1F`，装完即用，无需遥控器打字。
+
 ## 1. 一句话说明
 在 LG webOS 电视（G6，`192.168.1.4`）上安装一个后台应用：**电视每次开机后，自动向同一局域网内的 Win11 电脑（有线网卡）发送 Wake-on-LAN 魔术包，让电脑自动开机**。全程后台、无弹窗，可开关。
 
@@ -9,21 +12,22 @@
 | 项 | 值 |
 | --- | --- |
 | 电视 | LG **OLED55G6PCA**（webOS，IP `192.168.1.4`） |
-| 应用 | `com.woltv.wakeonlan` v0.0.1（**已安装、已启动**） |
+| 应用 | `com.woltv.wakeonlan` v0.0.1（**已安装、已启动、已验证能唤醒电脑**） |
 | 电脑 | Win11，走**有线网卡** IP `192.168.1.6`，MAC `CC:28:AA:A7:B4:1F` |
 | 局域网 | `192.168.1.0/24`，网关 `192.168.1.1` |
 | 快速启动 | 已关闭（`HiberbootEnabled=0`） |
 | 电脑 Wi-Fi | 已手动关闭，仅保留有线 |
 
-> 电视上该应用的默认配置：MAC=`CC:28:AA:A7:B4:1F`、IP=`255.255.255.255`(广播)、端口=9、开机自动发送=开、延迟15秒。
+> 电视上该应用的默认配置：MAC=**硬编码默认值 `CC:28:AA:A7:B4:1F`**、IP=`255.255.255.255`(广播)、端口=9、开机自动发送=开、**开机即网络就绪后立即发送（无固定延迟）**。首次打开即已填好，点「保存」即可。
 
 ## 3. 架构（怎么实现的）
-- **前端** `js/app.js`：设置界面。用 webOS 内置 `PalmServiceBridge` 调用后台服务，**无需 webOSTV.js**。
+- **前端** `js/app.js`：设置界面，**完全支持遥控器操作**（方向键移动焦点 + OK 确认，webOS 要求 `PalmServiceBridge` 回调 `return true`，前端所有调用带超时兜底，打开时自动 `getStatus` 自检后台服务是否存活）。用 webOS 内置 `PalmServiceBridge` 调用后台服务，**无需 webOSTV.js**。
 - **后台 JS Service** `services/com.woltv.wakeonlan.service/wol_service.js`：Node.js 进程，在电视上后台跑。
-  - 服务启动（电视开机/被拉起）时读配置，若 `enabled && sendOnBoot`，延迟 15 秒后用 Node `dgram` 发魔术包。
+  - 服务启动（电视开机/被拉起）时读配置，若 `enabled && sendOnBoot`，**轮询等网络就绪后立即**（无固定延迟）用 Node `dgram` 发魔术包。
   - 魔术包 = 6×`0xFF` + 目标 MAC×16，发往 UDP 端口 9。
-  - 配置存 DB8（`luna://com.palm.db`，kind `com.woltv.wakeonlan:1`，`private:true`，卸载即清）。
-- 服务总线方法：`wake` / `getConfig` / `setConfig` / `getStatus`（`services.json` 里声明）。
+  - 配置存 DB8（`luna://com.palm.db`，kind `com.woltv.wakeonlan:1`，`private:true`，卸载即清）。**DB 调用均带超时 + 内存缓存兜底**，DB 挂起/损坏也绝不卡死界面或崩溃服务；启动阶段全程 try/catch，保证方法总能注册、服务必活。
+- 服务总线方法：`wake` / `getConfig` / `setConfig` / `getStatus` / **`scan`**（`services.json` 里声明）。
+- **局域网扫描 `scan`**：不依赖 ICMP ping（服务进程无权限），改为**TCP 探测填充 ARP 缓存 + 读 `/proc/net/arp`**，只返回**当前开机**设备的 IP+MAC。
 
 ## 4. 维护常用操作
 
@@ -46,7 +50,7 @@ ares-launch  --device lg com.woltv.wakeonlan
 ```powershell
 ares-log --device lg com.woltv.wakeonlan.service
 ```
-成功应看到：`wol: service started; auto-sending magic packet in ...ms` 和 `wol: magic packet sent to ...`。
+成功应看到：`wol: service started; network already ready; sending magic packet now`（或 `waiting for network...`）和 `wol: magic packet sent to ...`。
 
 ### 卸载（不用了直接卸载应用即可，DB 一并清除）
 ```powershell
@@ -54,14 +58,22 @@ ares-remove --device lg com.woltv.wakeonlan
 ```
 
 ## 5. 改配置入口（在电视上操作）
-打开电视「Wake on LAN」应用：
-- 目标 MAC / IP / 端口
-- 「启用功能」总开关
-- 「开机自动发送」开关（默认开）
-- 「开机后延迟（秒）」（默认 15）
-改完点**保存设置**。
+打开电视「Wake on LAN」应用（**全程用遥控器即可，无需键盘**）：
+- **默认已填好**目标 MAC `CC:28:AA:A7:B4:1F`，通常**直接点「保存设置」**即可。
+- 想换设备：点**扫描设备** → 用方向键在**下拉框选择**（只列出当前开机的设备），按 OK 确认（自动填入 MAC/IP）。
+- 「启用功能」总开关、「开机自动发送」开关（默认开；电视开机、网络就绪后**立即发送，无延迟**）。
+改完点**保存设置**。状态栏会显示「后台服务正常」即说明服务链路 OK。
 
 ## 6. 电脑（Win11）侧要求（缺一不可，否则发了也开不了机）
+**推荐用检查脚本一键核对/修复：**
+```powershell
+cd C:\0_Code\wakeonlan-webos
+powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1       # 只检查
+powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员：检查并自动修复
+```
+检查项：① 有线网卡存在且 MAC 正确 ② 允许此设备唤醒计算机 ③ Wake on Magic Packet ④ 魔术包电源管理 ⑤ 快速启动已关闭。任一 [FAIL] 都会导致 WOL 失效。
+
+手动核对：
 1. 网卡开启 **Wake-on-LAN**（设备管理器→网卡→电源管理勾「允许此设备唤醒计算机」；高级页 `Wake on Magic Packet` 设为 Enabled）。
 2. **快速启动已关闭**（控制面板→电源→选择电源按钮功能→取消「启用快速启动」）。
 3. 电视与电脑**同一局域网**（均已满足：`192.168.1.x`）。
@@ -71,6 +83,7 @@ ares-remove --device lg com.woltv.wakeonlan
 | 现象 | 原因 / 解决 |
 | --- | --- |
 | `192.168.1.4:9922` 连不上 / getkey `Failed to get ssh private key` | **电脑开了 VPN**，与电视不在同一局域网。→ 部署时断开 VPN。 |
+| 扫描不到电脑 | 扫描只能发现**当前开机**的设备（电视权限限制，不能 ICMP ping，改用 TCP 探测 + ARP 表）。目标电脑若**关机**就扫不到 → 先开机扫描一次，或**手动填 MAC** `CC:28:AA:A7:B4:1F`。路由器的 IP/MAC（如 `192.168.1.1`）通常总能扫到，可用来确认扫描本身正常。 |
 | ping 通但 9922 不通 | 电视 Developer Mode 应用未在前台 / **Key Server 未开** / 会话过期（需重新登录/EXTEND）。保持应用前台，必要时重启电视。 |
 | 安装报 `All configured authentication methods failed` | SSH 密钥没装好。→ 用 `ares-novacom --device lg --getkey --passphrase <6位> `（**必须用 `--passphrase` 参数**，管道喂密码不可靠）。 |
 | 打包报 `Cannot package the directory with package directory` | 应用目录根放了 `packageinfo.json`。→ 删除它（打包自动生成），并把服务目录单独传给 `ares-package`。 |
@@ -78,18 +91,24 @@ ares-remove --device lg com.woltv.wakeonlan
 | Passphrase 取密钥失败 | 核对电视 Dev Mode 左下角 6 位字符，区分大小写；与应用里 `C30E73` 一致。 |
 | 打包警告 `requiredACG` | appinfo.json 里已加 `"requiredACG": []`。 |
 | 打包警告 Node 版本 | 服务代码已用 ES5 风格（`var`/回调），兼容旧 Node，可忽略。 |
+| 保存一直「保存中」或提示超时 | 旧版已修：DB 调用带超时+内存缓存、服务启动全程容错、前端回调 `return true`+12s 超时、打开时自检。若仍提示「后台服务无响应」，用 `ares-log` 看 `wol_service.js` 日志，或重启电视/重装。 |
+| 开机不自动唤醒电脑 | 检查 ① 应用里「开机自动发送」是否开 ② 电脑侧 `check-wol-win.ps1` 是否全 OK ③ 服务是否被开机拉起（`ares-log` 看 `service started`）。 |
 
 ## 8. 关键文件
 | 文件 | 作用 |
 | --- | --- |
 | `deploy-wakeonlan.ps1` | 一键部署脚本（断 VPN 后运行） |
-| `services/.../wol_service.js` | 后台服务：发魔术包 + DB8 配置 + 开机自启 |
+| `check-wol-win.ps1` | **Windows 侧 WOL 设置检查/一键修复脚本** |
+| `services/.../wol_service.js` | 后台服务：发魔术包 + DB8 配置 + 开机自启 + 局域网扫描 |
 | `services/.../services.json` | 声明服务总线方法 |
-| `js/app.js` | 前端：设置界面、开关、测试唤醒 |
+| `js/app.js` | 前端：遥控器导航 + 下拉选设备 + 开关 + 测试唤醒 |
 | `appinfo.json` | 应用元数据 |
 | `dist/` | 打包产物（.ipk，已加入 .gitignore） |
 
 ## 9. 说明 / 限制
 - 前端用 `PalmServiceBridge` 直接调服务，自包含、无需外部库；服务只用 webOS 预装模块 + Node 内置 `dgram`，无需 npm install。
-- 「开机自动发送」依赖 webOS 开机自动拉起 JS Service。本机已成功安装启动；若某固件开机不自动拉起服务，可用 `ares-launch` 启动一次验证链路，再考虑固化开机自启。
+- **扫描只能发现当前开机的设备**（电视服务进程不能 ICMP ping，靠 TCP 探测 + ARP 表）；目标电脑关机时扫不到属正常，可手动填 MAC。
+- 「开机自动发送」依赖 webOS 开机自动拉起 JS Service。本机已验证可用；若某固件开机不自动拉起服务，可用 `ares-launch` 启动一次验证链路，再考虑固化开机自启。
 - 发的是**局域网 UDP** 魔术包，外网不可用，需电视与电脑同网。
+- `check-wol-win.ps1` 为 **UTF-8(带 BOM)** 编码（含中文输出）；若用编辑器改过，请保持 BOM，否则 Windows PowerShell 5.1 会因中文乱码报解析错误。
+- 默认 MAC `CC:28:AA:A7:B4:1F` 目前**硬编码**为默认值（前端 `DEFAULT_MAC` + 后台 `DEFAULT_CONFIG.mac`），目标电脑若更换需改这两处并重新部署。

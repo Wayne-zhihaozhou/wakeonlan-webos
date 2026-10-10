@@ -75,7 +75,8 @@ label {
 }
 
 input[type="text"],
-input[type="number"] {
+input[type="number"],
+select {
     background: #0e141c;
     border: 1px solid #2a3948;
     border-radius: 8px;
@@ -85,12 +86,34 @@ input[type="number"] {
     width: 100%;
 }
 
-input:focus {
-    outline: none;
+select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%238fa1b3'><path d='M7 10l5 5 5-5z'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 44px;
+}
+
+select option {
+    background: #0e141c;
+    color: #e8edf4;
+}
+
+/* Visible focus ring so the TV remote can be followed on screen. */
+select:focus,
+input:focus,
+button:focus,
+.switch:focus {
+    outline: 3px solid #2f7dff;
+    outline-offset: 2px;
     border-color: #2f7dff;
 }
 
 .num-input { width: 120px; }
+
+.row.inline { align-items: center; }
+.row.inline .grow { flex: 1 1 360px; }
 
 /* toggle switch */
 .switch {

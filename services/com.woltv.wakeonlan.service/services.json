@@ -25,6 +25,11 @@
                     "name": "getStatus",
                     "description": "Return last send status",
                     "public": true
+                },
+                {
+                    "name": "scan",
+                    "description": "Scan LAN and list discovered devices (ip + mac)",
+                    "public": true
                 }
             ]
         }
