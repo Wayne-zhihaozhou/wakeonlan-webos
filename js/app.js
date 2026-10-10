@@ -358,8 +358,23 @@
         if (el === els.swEnabled) { els.enabled.checked = !els.enabled.checked; }
         else if (el === els.swSendOnBoot) { els.sendOnBoot.checked = !els.sendOnBoot.checked; }
         else if (el.tagName === 'BUTTON') { el.click(); }
-        // For text/number inputs, OK keeps native editing behaviour.
     }
+
+    /* ---------------- deferred keyboard for text fields -------------- */
+    // webOS 会在文本框获得焦点时立刻弹出系统软键盘，但用户往往只是在
+    // 用方向键「路过」这些输入框，并不想马上打字。因此让输入框平时保持
+    // readonly（聚焦不弹键盘），只有用户对某个输入框按 OK、明确要输入时
+    // 才解除 readonly，这时系统才会弹出键盘。编辑结束（失焦）后自动恢复
+    // readonly，下次再聚焦不会打扰。
+    function isEditableInput(el) {
+        return el && (el === els.mac || el === els.ip || el === els.port);
+    }
+
+    ['mac', 'ip', 'port'].forEach(function (key) {
+        els[key].addEventListener('blur', function () {
+            this.readOnly = true; // 结束编辑/移开焦点后再次锁定
+        });
+    });
 
     document.addEventListener('keydown', function (e) {
         var key = e.keyCode;
@@ -403,7 +418,14 @@
         // OK / Enter: activate.
         if (key === 13) {
             e.preventDefault();
-            activateFocused();
+            var act = document.activeElement;
+            // 对仍处于锁定的输入框按 OK：解除 readonly，此时系统才弹软键盘。
+            if (isEditableInput(act) && act.readOnly) {
+                act.readOnly = false;
+                act.focus();
+            } else {
+                activateFocused();
+            }
             return;
         }
 

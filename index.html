@@ -32,17 +32,18 @@
             <div class="row">
                 <div class="field grow">
                     <label for="mac">MAC 地址（选设备后自动填入，可手动改）</label>
-                    <input id="mac" type="text" placeholder="AA:BB:CC:DD:EE:FF" spellcheck="false">
+                    <input id="mac" type="text" placeholder="AA:BB:CC:DD:EE:FF" spellcheck="false" readonly>
                 </div>
                 <div class="field grow">
                     <label for="ip">目标 IP（可用 255.255.255.255 广播）</label>
-                    <input id="ip" type="text" placeholder="255.255.255.255" spellcheck="false">
+                    <input id="ip" type="text" placeholder="255.255.255.255" spellcheck="false" readonly>
                 </div>
                 <div class="field small">
                     <label for="port">端口</label>
-                    <input id="port" type="number" value="9" min="1" max="65535">
+                    <input id="port" type="number" value="9" min="1" max="65535" readonly>
                 </div>
             </div>
+            <p class="hint">聚焦到输入框时不会自动弹出键盘；需要修改时先按 OK 才会出现软键盘。</p>
         </section>
 
         <section class="card">
