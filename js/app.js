@@ -27,6 +27,7 @@
         swEnabled: document.getElementById('swEnabled'),
         swSendOnBoot: document.getElementById('swSendOnBoot'),
         save: document.getElementById('btnSave'),
+        exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
         status: document.getElementById('status')
     };
@@ -330,11 +331,27 @@
             .catch(showError);
     }
 
+    /* ---------------- exit app -------------------------------------- */
+    // 点击「退出」按钮时关闭应用，返回 webOS 桌面。webOS 中应用主窗口是
+    // 系统创建的子窗口，因此 window.close() 即可终止并退出；部分固件支持
+    // PalmSystem.close()，一并尝试兜底。
+    function exitApp() {
+        try {
+            if (window.PalmSystem && typeof window.PalmSystem.close === 'function') {
+                window.PalmSystem.close();
+                return;
+            }
+        } catch (e) { /* ignore and fall through */ }
+        try {
+            window.close();
+        } catch (e) { /* ignore */ }
+    }
+
     /* ---------------- remote control navigation --------------------- */
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.save, els.wake
+            els.swEnabled, els.swSendOnBoot, els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
     }
@@ -447,6 +464,7 @@
         else { openDropdown(); }
     });
     els.save.addEventListener('click', saveConfig);
+    els.exit.addEventListener('click', exitApp);
     els.wake.addEventListener('click', wakeNow);
 
     loadConfig();
