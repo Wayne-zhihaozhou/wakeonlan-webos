@@ -1,0 +1,17 @@
+{
+    "id": "com.woltv.wakeonlan",
+    "version": "0.0.1",
+    "vendor": "WOL TV",
+    "type": "web",
+    "main": "index.html",
+    "title": "Wake on LAN",
+    "appDescription": "Send Wake-on-LAN magic packet to a PC",
+    "icon": "icon.png",
+    "largeIcon": "largeIcon.png",
+    "resolution": "1920x1080",
+    "bgColor": "#10151c",
+    "splashColor": "#10151c",
+    "disableBackHistoryAPI": true,
+    "handlesRelaunch": false,
+    "requiredACG": []
+}

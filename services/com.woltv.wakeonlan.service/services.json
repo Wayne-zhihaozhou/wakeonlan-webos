@@ -1,0 +1,32 @@
+{
+    "id": "com.woltv.wakeonlan.service",
+    "description": "Wake on LAN Service",
+    "services": [
+        {
+            "name": "com.woltv.wakeonlan.service",
+            "description": "Sends Wake-on-LAN magic packets and stores configuration",
+            "commands": [
+                {
+                    "name": "wake",
+                    "description": "Send a magic packet now",
+                    "public": true
+                },
+                {
+                    "name": "getConfig",
+                    "description": "Return current configuration",
+                    "public": true
+                },
+                {
+                    "name": "setConfig",
+                    "description": "Store configuration",
+                    "public": true
+                },
+                {
+                    "name": "getStatus",
+                    "description": "Return last send status",
+                    "public": true
+                }
+            ]
+        }
+    ]
+}
