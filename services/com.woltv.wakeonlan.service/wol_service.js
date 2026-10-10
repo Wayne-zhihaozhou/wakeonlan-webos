@@ -376,47 +376,87 @@ function sendMagicPacket(cfg, cb) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Service entry point: auto-send at boot once the network is ready
+ *  Service entry point: auto-send at boot, as soon as possible
+ * ------------------------------------------------------------------ *
+ *  Old behaviour ran two blocking DB8 calls (ensureKind + loadConfig)
+ *  BEFORE it even started looking for the network, so a slow or hung
+ *  com.palm.db could delay the wake by many seconds. This version:
+ *    1. starts the network-poll loop IMMEDIATELY with the cached/default
+ *       config — no DB call sits in the critical path;
+ *    2. loads the real stored config from DB in PARALLEL with a short
+ *       timeout and swaps it in, so we still send to the correct MAC as
+ *       soon as it is known;
+ *    3. falls back to the default config after BOOT_FALLBACK_MS if the DB
+ *       is too slow, so a broken DB can never stall the wake;
+ *    4. polls every BOOT_POLL_MS (instead of 1000ms) so the magic packet
+ *       goes out within a fraction of a second of the network being ready,
+ *       and retries briefly on transient send errors.
  * ------------------------------------------------------------------ */
-function waitForNetworkAndSend(cfg, timeoutMs) {
-    if (!timeoutMs) { timeoutMs = 120000; } // give up after 2 min and try anyway
-    var deadline = Date.now() + timeoutMs;
-    var timer = setInterval(function () {
-        if (networkReady()) {
-            clearInterval(timer);
-            console.log('wol: network ready; sending magic packet now');
-            sendMagicPacket(cfg);
-        } else if (Date.now() > deadline) {
-            clearInterval(timer);
-            console.log('wol: network not ready after timeout; attempting send anyway');
-            sendMagicPacket(cfg);
+var BOOT_POLL_MS = 500;      // check network twice per second
+var BOOT_FALLBACK_MS = 6000; // if real config still unknown, send with default after this
+var BOOT_MAX_TRIES = 480;    // ~4 min at 500ms, generous upper bound
+
+function startBootAutosend() {
+    var sendCfg = configCache ? JSON.parse(JSON.stringify(configCache))
+                              : JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+    var realCfgLoaded = configCache !== null;
+
+    // Parallel, non-blocking: fetch the real stored config from DB with a
+    // short timeout. A slow DB can no longer delay the wake, but we still
+    // send to the correct MAC as soon as the DB answers (normally <1s, well
+    // before the network is even up on a cold boot).
+    try {
+        dbCall('find', { query: { from: KIND } }, function (res) {
+            if (res && res.returnValue && res.results && res.results.length) {
+                sendCfg = normalizeConfig(res.results[0]);
+                configCache = JSON.parse(JSON.stringify(sendCfg));
+            }
+            realCfgLoaded = true;
+        }, 4000);
+    } catch (e) {
+        realCfgLoaded = true; // never let an exception stall the fallback
+    }
+
+    var started = Date.now();
+    var sent = false;
+    var tries = 0;
+
+    function tick() {
+        if (sent) { return; }
+        tries++;
+
+        var cfgKnown = realCfgLoaded || (Date.now() - started >= BOOT_FALLBACK_MS);
+
+        if (cfgKnown && !(sendCfg.enabled && sendCfg.sendOnBoot)) {
+            console.log('wol: boot auto-send disabled (enabled=' + sendCfg.enabled +
+                ', sendOnBoot=' + sendCfg.sendOnBoot + ')');
+            return;
         }
-    }, 1000);
+
+        if (cfgKnown && networkReady()) {
+            sendWOL(sendCfg, function (err) {
+                if (!err) {
+                    sent = true;
+                    recordSend(true, '');
+                    console.log('wol: boot auto-send succeeded -> ' + sendCfg.mac);
+                } else {
+                    // Transient (e.g. route not fully ready yet); keep trying.
+                    console.log('wol: boot send attempt failed (retrying): ' + err.message);
+                }
+            });
+        }
+
+        if (!sent && tries < BOOT_MAX_TRIES) {
+            setTimeout(tick, BOOT_POLL_MS);
+        }
+    }
+    tick();
 }
 
 try {
-    ensureKind(function () {
-        try {
-            loadConfig(function (err, cfg) {
-                if (cfg && cfg.enabled && cfg.sendOnBoot) {
-                    if (networkReady()) {
-                        console.log('wol: service started; network already ready; sending magic packet now');
-                        sendMagicPacket(cfg);
-                    } else {
-                        console.log('wol: service started; waiting for network before sending magic packet');
-                        waitForNetworkAndSend(cfg);
-                    }
-                } else {
-                    console.log('wol: service started; auto-send disabled (enabled=' +
-                        (cfg && cfg.enabled) + ', sendOnBoot=' + (cfg && cfg.sendOnBoot) + ')');
-                }
-            });
-        } catch (e) {
-            console.log('wol: startup loadConfig error: ' + e);
-        }
-    });
+    startBootAutosend();
 } catch (e) {
-    console.log('wol: startup ensureKind error: ' + e);
+    console.log('wol: startup error: ' + e);
 }
 
 /* ------------------------------------------------------------------ *
