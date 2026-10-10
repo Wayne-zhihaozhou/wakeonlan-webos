@@ -58,7 +58,9 @@ var lastSend = { at: 0, ok: false, error: '' };
  * ------------------------------------------------------------------ */
 var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
-var bootAutoState = { armed: false, error: '', raw: '', trigger: '', diag: '' };
+// lastWol: 最近一次唤醒路径的结果，用于在 UI 上直接诊断「开机触发链路」——
+// none=服务启动后还未触发过唤醒；sent=已发出魔术包；timeout=等网络就绪超时；error=发送失败。
+var bootAutoState = { armed: false, error: '', raw: '', trigger: '', diag: '', lastWol: 'none' };
 // 不同 webOS 版本的连接管理服务名不同：新版用 com.webos.service.connectionmanager，
 // 旧版用 com.palm.connectionmanager。按顺序逐个尝试，直到 Activity 被成功受理。
 var BOOT_TRIGGER_METHODS = [
@@ -552,85 +554,68 @@ function sendMagicPacket(cfg, cb) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Service entry point: auto-send at boot, as soon as possible
+ *  Service entry point: auto-send at boot, no complex logic
  * ------------------------------------------------------------------ *
- *  Old behaviour ran two blocking DB8 calls (ensureKind + loadConfig)
- *  BEFORE it even started looking for the network, so a slow or hung
- *  com.palm.db could delay the wake by many seconds. This version:
- *    1. starts the network-poll loop IMMEDIATELY with the cached/default
- *       config — no DB call sits in the critical path;
- *    2. loads the real stored config from DB in PARALLEL with a short
- *       timeout and swaps it in, so we still send to the correct MAC as
- *       soon as it is known;
- *    3. falls back to the default config after BOOT_FALLBACK_MS if the DB
- *       is too slow, so a broken DB can never stall the wake;
- *    4. polls every BOOT_POLL_MS (instead of 1000ms) so the magic packet
- *       goes out within a fraction of a second of the network being ready,
- *       and retries briefly on transient send errors.
+ *  开机触发器已简化：不再判断网络是否就绪、不再读取默认路由、不再做
+ *  各种兜底，而是电视开机后立即开始，在 90 秒窗口内持续循环发送魔术包
+ *  （每 2 秒一次，UDP 广播）。连续多次发送显著提高对 Win 电脑的唤醒
+ *  成功率，也规避了「开机瞬间网络还没就绪导致第一次发送无效」的问题。
  * ------------------------------------------------------------------ */
-var BOOT_POLL_MS = 500;      // check network twice per second
-var BOOT_FALLBACK_MS = 6000; // if real config still unknown, send with default after this
-var BOOT_MAX_TRIES = 480;    // ~4 min at 500ms, generous upper bound
+var BOOT_SEND_WINDOW_MS = 90000;   // 开机后 90 秒的发送窗口
+var BOOT_SEND_INTERVAL_MS = 2000;  // 窗口期内每 2 秒重发一次魔术包
 
 function startBootAutosend() {
     var sendCfg = configCache ? JSON.parse(JSON.stringify(configCache))
                               : JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-    var realCfgLoaded = configCache !== null;
 
-    // Parallel, non-blocking: fetch the real stored config from DB with a
-    // short timeout. A slow DB can no longer delay the wake, but we still
-    // send to the correct MAC as soon as the DB answers (normally <1s, well
-    // before the network is even up on a cold boot).
+    // 从 DB 取真实配置（失败或超时就用默认配置），随后启动循环发送。
     try {
         dbCall('find', { query: { from: KIND } }, function (res) {
             if (res && res.returnValue && res.results && res.results.length) {
                 sendCfg = normalizeConfig(res.results[0]);
                 configCache = JSON.parse(JSON.stringify(sendCfg));
             }
-            realCfgLoaded = true;
             // Re-arm the persistent boot Activity to match the stored config.
             // (replace:true makes this idempotent, and it self-heals if the
             // Activity was ever lost.)
             setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
+            runBootSendLoop(sendCfg);
         }, 4000);
     } catch (e) {
-        realCfgLoaded = true; // never let an exception stall the fallback
+        runBootSendLoop(sendCfg);
+    }
+}
+
+function runBootSendLoop(cfg) {
+    if (!(cfg.enabled && cfg.sendOnBoot)) {
+        console.log('wol: boot auto-send disabled (enabled=' + cfg.enabled +
+            ', sendOnBoot=' + cfg.sendOnBoot + ')');
+        return;
     }
 
-    var started = Date.now();
-    var sent = false;
-    var tries = 0;
+    var windowStart = Date.now();
+    var sent = 0;
 
-    function tick() {
-        if (sent) { return; }
-        tries++;
-
-        var cfgKnown = realCfgLoaded || (Date.now() - started >= BOOT_FALLBACK_MS);
-
-        if (cfgKnown && !(sendCfg.enabled && sendCfg.sendOnBoot)) {
-            console.log('wol: boot auto-send disabled (enabled=' + sendCfg.enabled +
-                ', sendOnBoot=' + sendCfg.sendOnBoot + ')');
+    function sendOnce() {
+        if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
+            bootAutoState.lastWol = 'done';
+            console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
             return;
         }
-
-        if (cfgKnown && networkReady()) {
-            sendWOL(sendCfg, function (err) {
-                if (!err) {
-                    sent = true;
-                    recordSend(true, '');
-                    console.log('wol: boot auto-send succeeded -> ' + sendCfg.mac);
-                } else {
-                    // Transient (e.g. route not fully ready yet); keep trying.
-                    console.log('wol: boot send attempt failed (retrying): ' + err.message);
-                }
-            });
-        }
-
-        if (!sent && tries < BOOT_MAX_TRIES) {
-            setTimeout(tick, BOOT_POLL_MS);
-        }
+        sendWOL(cfg, function (err) {
+            if (err) {
+                bootAutoState.lastWol = 'error';
+                console.log('wol: boot send failed: ' + err.message);
+            } else {
+                sent++;
+                bootAutoState.lastWol = 'sent';
+                recordSend(true, '');
+                console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
+            }
+        });
+        setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
     }
-    tick();
+    sendOnce();
 }
 
 try {
@@ -662,8 +647,10 @@ service.register('wake', function (message) {
             if (networkReady()) {
                 sendMagicPacket(cfg, function (sendErr) {
                     if (sendErr) {
+                        bootAutoState.lastWol = 'error';
                         message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
                     } else {
+                        bootAutoState.lastWol = 'sent';
                         console.log('wol: wake sent after network ready');
                         message.respond({ returnValue: true, sent: true });
                     }
@@ -671,6 +658,7 @@ service.register('wake', function (message) {
                 return;
             }
             if (Date.now() - waitStart >= MAX_NET_WAIT_MS) {
+                bootAutoState.lastWol = 'timeout';
                 console.log('wol: wake aborted, network not ready within ' + MAX_NET_WAIT_MS + 'ms');
                 message.respond({ returnValue: false, errorText: 'network not ready before timeout' });
                 return;

@@ -1,7 +1,7 @@
 # 交接文档 · 电视开机自动唤醒电脑（开机自启问题）
 
 > 供接手同事排查/解决「电视开机 → 电脑自动开机」的问题。
-> 项目根：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026　|　状态：**进行中，卡在电视侧固件限制**
+> 项目根：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026　|　状态：**Activity Manager 方案真机两次测试均失败（电脑不醒），建议转向方案 B**
 
 ---
 
@@ -45,83 +45,89 @@
 
 ---
 
-## 3. 已经做的修改（本次会话，待验证）
+## 3. 已经做的修改（均已提交 git，且真机验证了一部分）
 
 目标：让电视开机时**自动**触发发送，无需打开应用。
 采用 webOS **Activity Manager**（`luna://com.palm.activitymanager`）注册一个**持久化、带触发器**的 Activity：
 电视开机、网络就绪（`connectionmanager/getStatus` 订阅变化）→ 触发 → 回调直接调用服务的 `wake` 方法发魔术包。
-持久化 Activity 存 DB8，每次开机系统自动重新武装。
 
-改动文件：
+改动文件（最近提交：`1afdf4c`「wake 先等网络就绪再发魔术包」、`df63f9b`「修复 service.call 调用方式 + UI 自动诊断」）：
 1. `services/com.woltv.wakeonlan.service/wol_service.js`
-   - 新增 `setBootAuto(enabled, cb)`：`create`（`replace:true, start:true, subscribe:true`，
-     `type:{background,persist}`，`trigger: com.webos.service.connectionmanager/getStatus`，
-     `callback: com.woltv.wakeonlan.service/wake`）或 `cancel`。
-   - `setConfig` 保存后按 `enabled && sendOnBoot` 自动同步；
-   - `startBootAutosend` 里按配置自愈重武装；
-   - `getStatus` 返回 `bootAuto:{armed,error,raw}`；
-   - 新增总线方法 `setBootAuto`；
-   - Activity Manager 的**完整原始返回已打进日志**（`wol: activity create response: {...}`）。
+   - `setBootAuto(enabled, cb)`：`create`（`replace/start/subscribe:true`、`type:{background,persist}`、
+     `trigger: connectionmanager/getStatus`、`callback: wake`）或 `cancel`；触发器地址**多候选**尝试
+     （`com.webos.service` → `com.palm` 两种 connectionmanager）。
+   - **修复调用方式**：`service.call` 必须用「完整 URI 带方法名 + 原始 payload」
+     `service.call(uri + '/' + method, parameters)`，不能传 `{method, parameters}` 包装。
+   - **修复时机**：`wake` 会先等 `networkReady()`（最多 2 分钟）再发，等待期间不 `respond`。
+   - `setConfig`/`startBootAutosend` 按配置自动同步武装；`getStatus` 返回 `bootAuto`。
+   - 新增总线方法 `setBootAuto`。
 2. `services/com.woltv.wakeonlan.service/services.json` —— 新增 `setBootAuto` 命令。
-3. `js/app.js` —— 保存后/打开时在状态栏显示「开机自启已启用 ✓ / 失败」。
-4. `README.md`、`HANDOVER.md` —— 更正开机自启原理说明。
+3. `js/app.js` —— 状态栏显示开机自启状态 + **UI 自动诊断**（无需看日志）。
+4. `README.md`、`HANDOVER.md`、`HANDOVER_WOL_BOOT_AUTOSTART.md` —— 文档同步。
 
-> ⚠️ 注意：本次代码改动**尚未在真机验证通过**，见下节。
+**真机验证结果（已部署到 LG G6 / webOS 26）：**
+- ✅ `url 无效` 报错已消除：保存设置后状态栏显示「开机自启已启用 ✓」（说明 Activity 已被 Activity Manager 受理）。
+- ❌ **端到端失败**：完全关电视再开机，**电脑始终没有被唤醒**。已连续两次真实测试均如此。
+
+> 关键结论：**触发器能"武装成功"（create 不报错），但电视冷开机后回调并没有真正把电脑唤醒。**
 
 ---
 
 ## 4. 当前卡点（需要接手同事解决的事）
 
-**现象**：保存设置后，界面状态栏报「开机自启启用失败，**url 不是一个有效网址**」。
+**现象（最新）**：保存设置后状态栏「开机自启已启用 ✓」——Activity 武装**成功**；
+但**完全关电视再开机后，电脑从未被唤醒**（已两次真机复现）。
 
-**首次尝试用的是** `trigger: luna://com.palm.connectionmanager/getStatus`，被 Activity Manager 校验拒绝（报 url 无效）。
-**已改成** `luna://com.webos.service.connectionmanager/getStatus`（新版 webOS 的正确订阅地址）。
+这说明问题不在"能不能注册 Activity"，而在"**冷开机后这个 Activity 有没有真正触发并完成唤醒**"。
+接手者下一步**必须上真机抓日志**（电视上看日志不便，见第 9 节坑；可用 `ares-log` 在电脑端抓）：
 
-> **已做修复（2026 交接会话）**，见下节「本次修复」。代码层面已：
-> 1. 把 `trigger` 连接管理器地址做成**多候选逐一尝试**：先试 `com.webos.service.connectionmanager`，失败再试 `com.palm.connectionmanager`，直到 Activity 被受理；
-> 2. 修复 `setConfig` 的**竞态**：之前保存后 UI 读到的是上一次（可能是旧的失败）的 `bootAuto` 状态，现在会等 `setBootAuto` 真正返回后再响应，界面显示的就是本次的真实结果；
-> 3. **UI 自动诊断（无需看日志）**：持久化创建失败时，服务会自动再用「非持久」试一次，并在**状态栏**直接显示结论。在电视上保存设置后看状态栏即可判断。
-> 4. **★ 真正根因一（调用方式，已修复）**：去掉 persist 仍报「url 无效」→ `service.call` 必须用
->    「完整 URI 带方法名 + 原始 payload」(`service.call(uri + '/' + method, parameters)`)，不能传
->    `{method, parameters}` 包装（会被原样发给无方法名地址，系统报 url 无效；DB 也因此在静默失败）。
-> 5. **★ 时机问题（已修复）**：触发器在 `connectionmanager` 状态一变化（常早于 WiFi 连上）就回调 `wake`，
->    网络未就绪、无 IP 时发 UDP 无效。已让 `wake` 先等 `networkReady()`（最多 2 分钟）再发；
->    等待期间不 `respond`，让请求保持 pending、服务进程不提前退出。
->
-> **仍需真机验证**，见下节「接手第一步」。
+**接手第一步（诊断触发链路断在哪一环）：**
+1. 重新部署：
+   ```powershell
+   cd C:\0_Code\wakeonlan-webos
+   powershell -ExecutionPolicy Bypass -File .\deploy-wakeonlan.ps1   # 断 VPN 后执行
+   ```
+2. 打开应用 → 勾选「开机自动发送」→ 保存，确认状态栏「开机自启已启用 ✓」（确保 Activity 已武装）。
+3. **完全关电视 → 重新开机**，在电脑端持续抓日志：
+   ```powershell
+   ares-log --device lg com.woltv.wakeonlan.service   # 开机后看是否有新日志
+   ```
+   开机后重点看**有没有出现以下任一标志**，判断断在哪一环：
+   - `wol: service com.woltv.wakeonlan.service registered` → 服务进程是否被拉起（若没有，说明 Activity 根本没触发回调/没拉起服务）；
+   - `wol: wake sent after network ready` → 触发器是否回调了 `wake`、是否等到了网络就绪、是否真的发了包；
+   - `wol: boot auto-send succeeded -> ...` → `startBootAutosend` 是否也发送成功；
+   - `wol: wake aborted, network not ready within 120000ms` → **网络就绪检测是否失败**（重点怀疑点，见下）。
 
-**接手第一步：重新部署并看这次结果。**
-```powershell
-cd C:\0_Code\wakeonlan-webos
-powershell -ExecutionPolicy Bypass -File .\deploy-wakeonlan.ps1   # 断 VPN 后执行
-```
-打开应用 → 勾选「开机自动发送」→ 点保存设置。然后：
-```powershell
-ares-log --device lg com.woltv.wakeonlan.service
-```
-**重点看这行日志，它会直接告诉你拒绝原因：**
-```
-wol: activity create [N] trigger=... -> { ... }
-wol: boot auto-launch ARMED via <触发器地址>   ← 成功
-wol: boot auto-launch attempt [N] FAILED (...) ← 失败，括号内即拒绝原因
-```
-- 若 `returnValue:true`（日志出现 `ARMED`）→ 成功，继续做「完全关电视再开机」的端到端验证。
-- 若两条候选地址都 `FAILED` → 看 `activity create [N] ... -> { ... }` 里到底指认**触发器地址**还是**回调地址**，再按第 5 节定位。
+   **不用日志也能看（UI 状态栏）**：服务已把「最近一次开机唤醒结果」写进 `bootAuto.lastWol`，
+   打开应用后状态栏会显示：
+   - `上次开机唤醒：开机后尚未触发` → Activity 冷开机**没有触发**（重点排查方向 B：Activity 未重武装/未触发）；
+   - `上次开机唤醒：等网络就绪超时（未发出）` → **重点方向 A：`networkReady()` 在 webOS 上探测不到网络**；
+   - `上次开机唤醒：已发送 ✓` → 包已发出，若电脑仍不醒则排查发送目标/网段。
+
+**接手者重点怀疑 / 排查方向（按可能性排序）：**
+- **A. `networkReady()`/`os.networkInterfaces()` 在 webOS 上不反映 WiFi**：`getLocalIpv4()` 可能一直返回
+  null（webOS 的 Node 对网络接口的报告与普通 Linux 不同），导致 `wake` 一直等到 2 分钟超时、不发包。
+  排查：开机后日志若持续出现 `wake aborted, network not ready` 即实锤。修法：改用连接管理器的
+  `com.webos.service.connectionmanager/getStatus` 返回的**有线/WiFi 状态或 IP 字段**判断就绪，
+  而不是依赖 `os.networkInterfaces()`；或在发送前强制按 `cfg.ip` 直发而不等接口探测。
+- **B. Activity 冷开机后没有被重新武装 / 没有触发**：`persist` 活动对第三方可能不会在每次开机自动
+  重新武装，或触发器没有在"网络就绪"这个时刻触发。排查：看开机后是否连 `service registered` 都没有。
+- **C. 回调被触发但目标地址/广播问题**：手动唤醒可用，基本可排除，但仍可核对 `cfg.ip` 是否落到正确网段。
+
+> **建议**：在方案 A 上花少量时间（重点是确认 `networkReady` 是否真的在开机后变 true）。若确认是
+> webOS 固件/接口层面的硬限制（探测不到网络就绪、或 Activity 根本不重武装），**不要再耗在电视侧**，
+> 直接采用**方案 B（常开设备监测电视上线）**——它不依赖电视固件，稳定且真正"同步开机"。
 
 ---
 
 ## 5. 接下来怎么排查 / 候选方案（按可靠性排序）
 
-### 方案 A：修好电视侧 Activity Manager（零额外硬件，优先）
-- 已把触发器换成 `com.webos.service.connectionmanager/getStatus`。若还报 url 无效：
-  1. 用 `luna-send` 在电视上手动验证触发器地址是否存在：
-     ```bash
-     luna-send -i -f luna://com.webos.service.connectionmanager/getStatus '{"subscribe":true}'
-     luna-send -i -f luna://com.palm.connectionmanager/getStatus '{"subscribe":true}'
-     ```
-  2. 若两者都不行，改用**系统电源事件**作触发器（研究 `com.webos.service.tvpower` / `systemservice` 的 powerState 订阅）。
-  3. 确认是否是"持久化 + 第三方"被拒：先去掉 `persist` / 改 `foreground` 试一次，区分是**权限问题**还是**参数问题**。
-- 风险：webOS 26 可能根本不允许第三方应用注册这类持久系统触发器——若排查确认是固件硬限制，果断转方案 B。
+### 方案 A：修好电视侧 Activity Manager（零额外硬件，先花少量时间）
+> ⚠️ `url 无效` 调用方式问题**已修复**，Activity 已能武装成功；但**真机冷开机两次仍不醒**。
+> 方案 A 目前只剩"触发链路"没打通，重点先查第 4 节的**方向 A（networkReady 是否真的变 true）**：
+> - 确认 `os.networkInterfaces()` 在 webOS 上是否反映 WiFi；若一直拿不到 IP，`wake` 会等到 2 分钟超时。
+> - 备用触发器：系统电源事件（`com.webos.service.tvpower` / `systemservice` powerState 订阅）。
+> 若 1~2 次排查确认是固件/接口硬限制（探测不到网络就绪、或 Activity 冷开机不重武装），**果断转方案 B**。
 
 ### 方案 B：常开设备监测电视上线（最可靠，但需加硬件）
 原理：局域网里一台**始终在线**的设备，轮询/ARP 检测到电视 IP `192.168.1.4` 上线 → 立刻向电脑 `CC:28:AA:A7:B4:1F` 发 WoL。
@@ -133,7 +139,9 @@ wol: boot auto-launch attempt [N] FAILED (...) ← 失败，括号内即拒绝�
 - webOS bootd（`com.webos.service.bootd`）能否把 JS Service 加入开机启动——大概率需签名/root，消费者固件不开放。
 - `appinfo.json` 是否有"开机自启"字段——官方文档未见，基本不可用。
 
-> **建议**：先花少量时间确认方案 A 是否被固件硬限制；若 1~2 次尝试仍被拒，直接采用方案 B（加一台常开小设备），它不依赖电视固件、稳定且真正同步。
+> **建议**：电视侧 Activity 方案已在真机**两次失败**（能武装但不唤醒）。先花少量时间按第 4 节
+> 抓日志确认「触发链路断在哪一环」（重点方向 A：networkReady 是否变 true）。若确认是电视侧硬限制，
+> **直接采用方案 B（常开小设备监测电视上线）**——它不依赖电视固件、稳定且真正同步，是最保险的落地路径。
 
 ---
 
@@ -169,11 +177,12 @@ ares-log     --device lg com.woltv.wakeonlan.service
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| `url 不是一个有效网址`（持久与非持久都报） | **根因是调用方式**：`service.call` 必须用「完整 URI 带方法名 + 原始 payload」。若看到此错，先确认 `wol_service.js` 的 `lunaCall` 用的是 `service.call(uri + '/' + method, parameters, ...)`，而不是 `{method, parameters}` 包装。 |
-| 保存后状态栏仍提示失败 | 用 `ares-log` 看 `wol: activity create [N] ... -> { ... }` 与 `wol: boot auto-launch attempt [N] FAILED (...)`。（已修复竞态：现在状态栏显示的是本次保存的真实 arm 结果。） |
+| 保存后状态栏「开机自启已启用 ✓」，但**完全关机再开机后电脑不醒** | **当前核心卡点**。Activity 能武装但冷开机触发链路没打通。按第 4 节抓日志，判断断在：① 服务进程没被拉起（无 `service registered`）→ Activity 未触发/未重武装；② 有 `wake aborted, network not ready` → `networkReady()` 在 webOS 上探测不到网络（重点方向 A）；③ 无 `wake sent` → 回调未真正发包。 |
+| `url 不是一个有效网址`（持久与非持久都报） | **已修复**：`service.call` 必须用「完整 URI 带方法名 + 原始 payload」。若再看到此错，确认 `lunaCall` 用的是 `service.call(uri + '/' + method, parameters, ...)`。 |
+| 保存后状态栏仍提示失败 | 用 `ares-log` 看 `wol: activity create [N] ... -> { ... }` 与 `wol: boot auto-launch attempt [N] FAILED (...)`。 |
 | `192.168.1.4:9922` 连不上 / getkey 失败 | 电脑开了 VPN，与电视不同网段 → **部署时断开 VPN**。 |
 | ping 通但 9922 不通 | 电视 Developer Mode 应用需保持前台、Key Server 开、会话未过期；必要时重启电视。 |
-| 手动唤醒能开机、开机自启不行 | 印证根因：服务进程没被自动拉起，或触发时网络未就绪。**先确认已修复的两点**：① `service.call` 调用方式（见上「url 无效」行）；② `wake` 会先等 `networkReady()` 再发（电视冷开机连 WiFi 需时间，网络没 IP 时 UDP 无效）。若两点都排除了仍不行，走方案 B。 |
+| 手动唤醒能开机、开机自启不行 | **核心现状**：手动链路 OK、Activity 武装 OK，但冷开机不醒。先按第 4 节抓日志定位触发链路，若确认电视侧硬限制，走**方案 B**。 |
 
 ---
 
@@ -191,7 +200,11 @@ ares-log     --device lg com.woltv.wakeonlan.service
 
 ## 10. 交接人给接手同事的一句话建议
 
-先别急着大改。**第一步 = 重新部署，打开应用勾选「开机自动发送」并保存，直接看 UI 状态栏**：
-- 显示「开机自启已启用 ✓」→ 通过，做端到端验证；
-- 显示「⚠ 启用失败」+ 自动诊断文案（见第 8 节）→ 按诊断结论走：若是固件禁止第三方持久化，
-  多数情况最终建议落在**方案 B（常开设备监测电视上线）**，它不依赖电视固件、稳定且真正实现"同步开机"。
+**不要只盯着"能不能武装"——那已经成功了。真正的坑是：Activity 武装 OK，但电视冷开机后电脑就是不醒（两次实测）。**
+下一步的唯一关键是**抓开机日志定位触发链路断在哪一环**（见第 4 节）：
+- 连 `service registered` 都没有 → Activity 冷开机根本没触发/没重武装；
+- 有 `wake aborted, network not ready` → `networkReady()` 在 webOS 上探测不到网络，改判断方式；
+- 有 `wake sent` 仍不醒 → 再看发送目标/网段。
+
+**若确认是电视侧硬限制（webOS 26 不给第三方做可靠的冷开机自启），不要再耗在电视上**，
+直接上**方案 B（常开小设备监测电视上线 → 发 WoL）**，它不依赖电视固件、稳定且真正"同步开机"。

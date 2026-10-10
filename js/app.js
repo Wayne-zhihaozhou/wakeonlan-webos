@@ -312,6 +312,17 @@
         return s;
     }
 
+    function lastWolTxt(ba) {
+        if (!ba || !ba.armed) { return ''; }
+        var m = {
+            sent: '已发送 ✓',
+            timeout: '等网络就绪超时（未发出）',
+            error: '发送失败',
+            none: '开机后尚未触发'
+        };
+        return '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
+    }
+
     function saveConfig() {
         var cfg = readForm();
         if (!validMac(cfg.mac)) {
@@ -321,7 +332,8 @@
         setStatus('保存中…');
         callService('setConfig', cfg)
             .then(function (res) {
-                setStatus('已保存 ✓' + bootAutoTxt(res && res.bootAuto), 'ok');
+                setStatus('已保存 ✓' + bootAutoTxt(res && res.bootAuto) +
+            lastWolTxt(res && res.bootAuto), 'ok');
             })
             .catch(showError);
     }
@@ -484,7 +496,8 @@
     callService('getStatus', {}, 6000)
         .then(function (res) {
             setStatus('后台服务正常' + (res.localIp ? '，本机 ' + res.localIp : '') +
-                bootAutoTxt(res && res.bootAuto) + '。', 'ok');
+                bootAutoTxt(res && res.bootAuto) +
+                lastWolTxt(res && res.bootAuto) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');
