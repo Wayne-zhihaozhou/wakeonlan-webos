@@ -90,7 +90,7 @@ powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员�
 | 安装报 `All configured authentication methods failed` | SSH 密钥没装好。→ 用 `ares-novacom --device lg --getkey --passphrase <6位> `（**必须用 `--passphrase` 参数**，管道喂密码不可靠）。 |
 | 打包报 `Cannot package the directory with package directory` | 应用目录根放了 `packageinfo.json`。→ 删除它（打包自动生成），并把服务目录单独传给 `ares-package`。 |
 | CLI 把设备 host 存成 `127.0.0.1` | 手动改 `%APPDATA%\.webos\tv\novacom-devices.json` 对应设备 `host` 为 `192.168.1.4`（脚本自动修）。 |
-| Passphrase 取密钥失败 | 核对电视 Dev Mode 左下角 6 位字符，区分大小写；与应用里 `C30E73` 一致。 |
+| Passphrase 取密钥失败 | 核对电视 Dev Mode 左下角 6 位字符，区分大小写；确认传入的 Passphrase 与之一致（脚本通过参数 / 环境变量 `WEBOS_PASSPHRASE` / 本地 `passphrase.txt` / 交互输入获取，见脚本头注释）。 |
 | 打包警告 `requiredACG` | appinfo.json 里已加 `"requiredACG": []`。 |
 | 打包警告 Node 版本 | 服务代码已用 ES5 风格（`var`/回调），兼容旧 Node，可忽略。 |
 | 保存一直「保存中」或提示超时 | 旧版已修：DB 调用带超时+内存缓存、服务启动全程容错、前端回调 `return true`+12s 超时、打开时自检。若仍提示「后台服务无响应」，用 `ares-log` 看 `wol_service.js` 日志，或重启电视/重装。 |

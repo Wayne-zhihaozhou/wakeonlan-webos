@@ -7,7 +7,14 @@
 
   用法（建议管理员 PowerShell）：
       powershell -ExecutionPolicy Bypass -File .\deploy-wakeonlan.ps1
-  自定义：.\deploy-wakeonlan.ps1 -TvIp 192.168.1.4 -Device lg -Passphrase C30E73
+  可选参数：-TvIp <电视IP> -Device <设备名> -Passphrase <6位Passphrase>
+
+  Passphrase（电视 Developer Mode 左下角 6 位字符）按以下顺序获取：
+      1) -Passphrase 参数
+      2) 环境变量 WEBOS_PASSPHRASE
+      3) 项目根目录 passphrase.txt（已 gitignore，不会提交）
+      4) 交互式输入
+   不再内置/默认任何具体 Passphrase。
 
   自动完成：连通行检查 → 修正novacom host → 取密钥 → 打包 → 安装 → 启动
   每步打印 [OK]/[FAIL]，末尾给汇总。
@@ -18,7 +25,7 @@ param(
     [string]$TvIp       = '192.168.1.4',
     [int]   $TvPort     = 9922,
     [string]$Device     = 'lg',
-    [string]$Passphrase = 'C30E73',
+    [string]$Passphrase = '',
     [string]$ProjectDir = '',
     [switch]$SkipLaunch,
     [switch]$TestWake
@@ -35,6 +42,19 @@ function Say($msg) { Write-Host $msg }
 function Ok($msg)  { Write-Host ("  [OK]   " + $msg) -ForegroundColor Green }
 function Fail($msg){ Write-Host ("  [FAIL] " + $msg) -ForegroundColor Red }
 function Warn($msg){ Write-Host ("  [!!]   " + $msg) -ForegroundColor Yellow }
+
+# 解析 Passphrase：参数 > 环境变量 > 本地 passphrase.txt > 交互输入。绝不内置任何具体值。
+function Get-Passphrase {
+    if ($Passphrase) { return $Passphrase }
+    if ($env:WEBOS_PASSPHRASE) { return $env:WEBOS_PASSPHRASE }
+    $pf = Join-Path $PSScriptRoot 'passphrase.txt'
+    if (Test-Path $pf) {
+        $p = (Get-Content $pf -Raw).Trim()
+        if ($p) { return $p }
+    }
+    $p = Read-Host "请输入电视 Developer Mode 左下角显示的 6 位 Passphrase（区分大小写）"
+    return $p.Trim()
+}
 
 function Step-Port([string]$ip, [int]$port) {
     $c = New-Object System.Net.Sockets.TcpClient
@@ -65,7 +85,7 @@ function Get-Key {
     $out = & ares-novacom --device $Device --getkey --passphrase $Passphrase 2>&1 | Out-String
     if ($out -match 'ERR!|Failed|Error|denied|invalid|passphrase') {
         Fail "取密钥失败: $($out.Trim())"
-        Fail "请确认电视 Developer Mode 左下角显示的 Passphrase 与 '$Passphrase' 完全一致（区分大小写），并保持应用在前台。"
+        Fail "请确认：① 电视 Developer Mode 保持在前台（Dev Mode Status=ON、Key Server=ON、会话未过期）；② 使用的 Passphrase 与电视左下角 6 位字符完全一致（区分大小写）。"
         return $false
     }
     return $true
@@ -97,6 +117,11 @@ if (Patch-NovacomHost) { Ok "novacom 配置已更新 (device=$Device -> $TvIp)" 
 else { Fail "未找到 novacom 配置"; $summary += 'FAIL host'; exit 1 }
 
 Say "`n[4/7] 获取 SSH 密钥 ..."
+$Passphrase = Get-Passphrase
+if (-not $Passphrase) {
+    Fail "未取得 Passphrase。请用 -Passphrase 参数、环境变量 WEBOS_PASSPHRASE、passphrase.txt 或交互输入提供。"
+    $summary += 'FAIL key'; exit 1
+}
 if (Get-Key) { Ok "取密钥成功（已连上电视）"; $summary += 'OK key' }
 else { $summary += 'FAIL key'; exit 1 }
 

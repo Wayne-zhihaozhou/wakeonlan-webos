@@ -9,3 +9,7 @@ npm-debug.log*
 # 系统/编辑器
 .DS_Store
 Thumbs.db
+
+# 本地 Passphrase（含个人电视密钥，勿提交）
+passphrase.txt
+*.local.ps1
