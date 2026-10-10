@@ -407,10 +407,13 @@
             return;
         }
 
-        // Back / Exit on the main page: nothing to undo, swallow it so it
-        // never closes the app unexpectedly.
+        // Back / Exit on the main page: this is a single-screen app, so there
+        // is no internal page to "go back" to — the expected behaviour is to
+        // close the app and return to the launcher. Deliberately do NOT
+        // preventDefault here: let webOS's default action close the app window.
+        // (Backspace/8 only matters while typing in a field, where the browser
+        // default of deleting a character is exactly what we want.)
         if (key === 461 || key === 8) {
-            e.preventDefault();
             return;
         }
     });
