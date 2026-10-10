@@ -15,6 +15,13 @@
 - 部署脚本：`deploy-wakeonlan.ps1`（**断 VPN 后**执行）
 - 交接 / 维护文档：见 **`HANDOVER.md`**
 
+> ### 部署脚本怎么用（含 SSH 密钥）
+> 直接运行即可，脚本会自动：连通检查 → 修正 novacom host → 取密钥 → 打包 → 安装 → 启动。
+> 其中的 **SSH 密钥（Passphrase，电视 Developer Mode 左下角 6 位）按顺序读取**：
+> `-Passphrase` 参数 → 环境变量 `WEBOS_PASSPHRASE` → 本地 `passphrase.txt` → 交互输入。
+> **本项目仓库里 `passphrase.txt` 已被 gitignore，不会提交**，放的是作者自己电视的密钥；
+> 其他开发者拉到源码后，请把 `passphrase.txt` 改成**自己电视**左下角显示的 6 位即可（只改这一个文件，无需改脚本）。
+
 ---
 
 ## 目录结构
