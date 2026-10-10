@@ -305,8 +305,49 @@ function getLocalIpv4() {
     return null;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Real network readiness check
+ *  ------------------------------------------------------------------ *
+ *  A TV has an IPv4 address as soon as the Wi-Fi interface comes up,
+ *  but that is NOT the same as being online: right after boot the Wi-Fi
+ *  still needs a few seconds to finish associating and to receive a
+ *  gateway/default-route from DHCP. If we fire the magic packet during
+ *  that window it has no usable route to the LAN and the PC never wakes.
+ *
+ *  So "ready" here means: we have a real IPv4 address AND the kernel has
+ *  installed a default route (0.0.0.0) — the reliable sign that the Wi-Fi
+ *  has actually finished connecting. On webOS we read /proc/net/route the
+ *  same way we already read /proc/net/arp.
+ * ------------------------------------------------------------------ */
+function readDefaultRouteInfo() {
+    // Returns { available: bool, hasDefault: bool }.
+    var info = { available: false, hasDefault: false };
+    try {
+        var text = fs.readFileSync('/proc/net/route', 'utf8');
+        info.available = true;
+        var lines = String(text).split('\n');
+        // Columns: Iface | Destination | Gateway | Flags | RefCnt | Use | Metric | Mask ...
+        // Destination "00000000" == default route (0.0.0.0).
+        for (var i = 1; i < lines.length; i++) {
+            var f = lines[i].trim().split(/\s+/);
+            if (f.length >= 2 && f[1] === '00000000') {
+                info.hasDefault = true;
+                break;
+            }
+        }
+    } catch (e) { /* /proc may be unavailable in some sandboxes -> fall back to IP-only */ }
+    return info;
+}
+
 function networkReady() {
-    return getLocalIpv4() !== null;
+    // An IP alone is not enough (Wi-Fi may still be associating). Prefer to
+    // require a default route too, but if /proc/net/route cannot be read at
+    // all, fall back to the old IP-only check so we never get stuck.
+    var ip = getLocalIpv4();
+    if (!ip) { return false; }
+    var rt = readDefaultRouteInfo();
+    if (!rt.available) { return true; }  // route file unreadable -> trust the IP
+    return rt.hasDefault;                // otherwise wait for the route to appear
 }
 
 function parseArpTableText(text) {
@@ -609,13 +650,34 @@ service.register('wake', function (message) {
         if (p.ip) { cfg.ip = p.ip; }
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
-        sendMagicPacket(cfg, function (sendErr) {
-            if (sendErr) {
-                message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
-            } else {
-                message.respond({ returnValue: true, sent: true });
+
+        // 时机关键：开机触发器在 connectionmanager 状态一变化（常早于 WiFi 连上）就会
+        // 回调本方法。此时网络未就绪、还没拿到 IP，发 UDP 魔术包是无效的。
+        // 这里先等 networkReady()（拿到真实 IPv4 地址）再发；等待期间不 respond，
+        // 让请求保持 pending，服务进程也不会提前退出。手动点「立即唤醒」时网络已就绪，
+        // 会立即发送、无额外延迟。
+        var waitStart = Date.now();
+        var MAX_NET_WAIT_MS = 120000; // 最多等 2 分钟，足够冷启动连上 WiFi
+        function attemptSend() {
+            if (networkReady()) {
+                sendMagicPacket(cfg, function (sendErr) {
+                    if (sendErr) {
+                        message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
+                    } else {
+                        console.log('wol: wake sent after network ready');
+                        message.respond({ returnValue: true, sent: true });
+                    }
+                });
+                return;
             }
-        });
+            if (Date.now() - waitStart >= MAX_NET_WAIT_MS) {
+                console.log('wol: wake aborted, network not ready within ' + MAX_NET_WAIT_MS + 'ms');
+                message.respond({ returnValue: false, errorText: 'network not ready before timeout' });
+                return;
+            }
+            setTimeout(attemptSend, 500);
+        }
+        attemptSend();
     });
 });
 

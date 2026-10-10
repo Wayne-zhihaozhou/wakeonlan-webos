@@ -81,12 +81,12 @@
 > 1. 把 `trigger` 连接管理器地址做成**多候选逐一尝试**：先试 `com.webos.service.connectionmanager`，失败再试 `com.palm.connectionmanager`，直到 Activity 被受理；
 > 2. 修复 `setConfig` 的**竞态**：之前保存后 UI 读到的是上一次（可能是旧的失败）的 `bootAuto` 状态，现在会等 `setBootAuto` 真正返回后再响应，界面显示的就是本次的真实结果；
 > 3. **UI 自动诊断（无需看日志）**：持久化创建失败时，服务会自动再用「非持久」试一次，并在**状态栏**直接显示结论。在电视上保存设置后看状态栏即可判断。
-> 4. **★ 真正根因（UI 诊断定位）：去掉 persist 仍报「url 无效」→ 不是 persist 权限，是调用方式错误。**
->    根因：`service.call(uri, {method, parameters}, ...)` 这种写法不被这台 webOS 的 `webos-service`
->    模块识别，它把 `{method,parameters}` 原样当 payload 发到**没有方法名**的地址
->    `luna://com.palm.activitymanager`，系统因此报「url 不是一个有效网址」。
->    已改为**完整 URI 带方法名 + 原始 payload**：`service.call(uri + '/' + method, parameters, ...)`。
->    （这同时也解释了为何 DB 的 find/put 此前一直静默失败——被 saveConfig「失败也报成功、退回内存」掩盖。）
+> 4. **★ 真正根因一（调用方式，已修复）**：去掉 persist 仍报「url 无效」→ `service.call` 必须用
+>    「完整 URI 带方法名 + 原始 payload」(`service.call(uri + '/' + method, parameters)`)，不能传
+>    `{method, parameters}` 包装（会被原样发给无方法名地址，系统报 url 无效；DB 也因此在静默失败）。
+> 5. **★ 时机问题（已修复）**：触发器在 `connectionmanager` 状态一变化（常早于 WiFi 连上）就回调 `wake`，
+>    网络未就绪、无 IP 时发 UDP 无效。已让 `wake` 先等 `networkReady()`（最多 2 分钟）再发；
+>    等待期间不 `respond`，让请求保持 pending、服务进程不提前退出。
 >
 > **仍需真机验证**，见下节「接手第一步」。
 
@@ -173,7 +173,7 @@ ares-log     --device lg com.woltv.wakeonlan.service
 | 保存后状态栏仍提示失败 | 用 `ares-log` 看 `wol: activity create [N] ... -> { ... }` 与 `wol: boot auto-launch attempt [N] FAILED (...)`。（已修复竞态：现在状态栏显示的是本次保存的真实 arm 结果。） |
 | `192.168.1.4:9922` 连不上 / getkey 失败 | 电脑开了 VPN，与电视不同网段 → **部署时断开 VPN**。 |
 | ping 通但 9922 不通 | 电视 Developer Mode 应用需保持前台、Key Server 开、会话未过期；必要时重启电视。 |
-| 手动唤醒能开机、开机自启不行 | 印证根因：服务进程没被自动拉起。若 Activity Manager 也被拒，走方案 B。 |
+| 手动唤醒能开机、开机自启不行 | 印证根因：服务进程没被自动拉起，或触发时网络未就绪。**先确认已修复的两点**：① `service.call` 调用方式（见上「url 无效」行）；② `wake` 会先等 `networkReady()` 再发（电视冷开机连 WiFi 需时间，网络没 IP 时 UDP 无效）。若两点都排除了仍不行，走方案 B。 |
 
 ---
 
