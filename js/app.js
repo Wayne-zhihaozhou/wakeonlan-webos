@@ -17,6 +17,7 @@
 
     var els = {
         device: document.getElementById('device'),
+        deviceList: document.getElementById('deviceList'),
         scan: document.getElementById('btnScan'),
         mac: document.getElementById('mac'),
         ip: document.getElementById('ip'),
@@ -87,70 +88,100 @@
     }
 
     /* ---------------- device dropdown ------------------------------- */
+    // 使用自定义下拉列表（非原生 <select>），否则 webOS 电视上的系统原生
+    // 下拉弹层会吞掉遥控器返回键，导致用户进入列表后无法退出。
     function macLabel(mac) {
         return String(mac || '').toUpperCase();
     }
 
+    var deviceOptions = []; // [{ value, label }]
+    var deviceSelected = 0; // index of the chosen option
+    var deviceOpen = false;
+    var deviceActive = 0;   // index of the highlighted option while open
+
     function rebuildDeviceList(devices, broadcast) {
         devicesCache = devices || [];
-        els.device.innerHTML = '';
+        deviceOptions = [];
 
         // 1) Preserve the currently saved target as the first option.
         var curMac = macLabel(els.mac.value.trim());
         var curIp = els.ip.value.trim();
         if (curMac && curMac.length >= 12) {
-            addOption(curMac, '当前设置 (' + curMac + (curIp ? ' / ' + curIp : '') + ')');
+            deviceOptions.push({
+                value: curMac,
+                label: '当前设置 (' + curMac + (curIp ? ' / ' + curIp : '') + ')'
+            });
         } else {
-            addOption('', '—— 请选择设备 ——');
+            deviceOptions.push({ value: '', label: '—— 请选择设备 ——' });
         }
 
         // 2) Discovered devices.
         if (broadcast) {
-            addOption('broadcast:' + broadcast, '广播唤醒所有设备 (' + broadcast + ')');
+            deviceOptions.push({
+                value: 'broadcast:' + broadcast,
+                label: '广播唤醒所有设备 (' + broadcast + ')'
+            });
         }
         for (var i = 0; i < devicesCache.length; i++) {
             var d = devicesCache[i];
             var label = (d.ip || '?') + (d.mac ? '  (' + macLabel(d.mac) + ')' : '');
-            addOption(d.mac + '|' + (d.ip || ''), label);
+            deviceOptions.push({ value: d.mac + '|' + (d.ip || ''), label: label });
         }
 
-        selectCurrentInDropdown();
+        deviceSelected = matchCurrentIndex();
+        renderDeviceList();
+        setTriggerLabel();
     }
 
-    function addOption(value, text) {
-        var opt = document.createElement('option');
-        opt.value = value;
-        opt.textContent = text;
-        els.device.appendChild(opt);
+    function renderDeviceList() {
+        var frag = document.createDocumentFragment();
+        for (var i = 0; i < deviceOptions.length; i++) {
+            (function (idx) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'dd-item';
+                btn.setAttribute('role', 'option');
+                btn.textContent = deviceOptions[idx].label;
+                btn.addEventListener('click', function () {
+                    selectDevice(idx);
+                    closeDropdown();
+                });
+                frag.appendChild(btn);
+            })(i);
+        }
+        els.deviceList.innerHTML = '';
+        els.deviceList.appendChild(frag);
     }
 
-    // After rebuilding, try to select the option matching the current MAC/IP.
-    function selectCurrentInDropdown() {
+    // Index of the option matching the current MAC (fall back to 0).
+    function matchCurrentIndex() {
         var curMac = macLabel(els.mac.value.trim());
-        var curIp = els.ip.value.trim();
-        var opts = els.device.options;
-        for (var i = 0; i < opts.length; i++) {
-            var val = opts[i].value;
-            if (val.indexOf(curMac) === 0 && curMac) {
-                els.device.selectedIndex = i;
-                return;
-            }
+        for (var i = 0; i < deviceOptions.length; i++) {
+            if (curMac && deviceOptions[i].value.indexOf(curMac) === 0) { return i; }
         }
-        // Fall back to first option if none matched but MAC present.
-        if (curMac && opts.length > 0) { els.device.selectedIndex = 0; }
+        return 0;
     }
 
-    function onDeviceChange() {
-        var val = els.device.value;
-        if (!val) { return; }
+    function selectDevice(idx) {
+        if (idx < 0 || idx >= deviceOptions.length) { return; }
+        deviceSelected = idx;
+        applyDeviceValue(deviceOptions[idx].value);
+        setTriggerLabel();
+    }
 
+    function setTriggerLabel() {
+        var opt = deviceOptions[deviceSelected];
+        els.device.textContent = opt ? opt.label : '—— 请选择设备 ——';
+    }
+
+    function applyDeviceValue(val) {
+        if (!val) { return; }
         if (val.indexOf('broadcast:') === 0) {
             els.mac.value = '';
             els.ip.value = val.slice('broadcast:'.length);
             els.mac.placeholder = '广播模式：请在下方手动填 MAC';
             return;
         }
-
         var parts = val.split('|');
         var mac = parts[0] || '';
         var ip = parts[1] || '';
@@ -158,6 +189,44 @@
         if (ip) { els.ip.value = ip; }
         els.mac.placeholder = 'AA:BB:CC:DD:EE:FF';
         setStatus('已选择设备：' + mac + (ip ? ' @ ' + ip : ''), 'ok');
+    }
+
+    function openDropdown() {
+        if (deviceOpen) { return; }
+        deviceOpen = true;
+        els.device.setAttribute('aria-expanded', 'true');
+        els.deviceList.hidden = false;
+        deviceActive = deviceSelected;
+        updateActiveItem();
+    }
+
+    function closeDropdown() {
+        if (!deviceOpen) { return; }
+        deviceOpen = false;
+        els.device.setAttribute('aria-expanded', 'false');
+        els.deviceList.hidden = true;
+        els.device.focus();
+    }
+
+    function updateActiveItem() {
+        var items = els.deviceList.children;
+        for (var i = 0; i < items.length; i++) {
+            items[i].classList.toggle('focused', i === deviceActive);
+        }
+        if (items[deviceActive]) {
+            items[deviceActive].scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    function moveActive(delta) {
+        if (deviceOptions.length === 0) { return; }
+        deviceActive = (deviceActive + delta + deviceOptions.length) % deviceOptions.length;
+        updateActiveItem();
+    }
+
+    function chooseActive() {
+        selectDevice(deviceActive);
+        closeDropdown();
     }
 
     function scanDevices() {
@@ -289,18 +358,41 @@
         if (el === els.swEnabled) { els.enabled.checked = !els.enabled.checked; }
         else if (el === els.swSendOnBoot) { els.sendOnBoot.checked = !els.sendOnBoot.checked; }
         else if (el.tagName === 'BUTTON') { el.click(); }
-        // For SELECT / inputs, OK keeps native behaviour (open / edit).
+        // For text/number inputs, OK keeps native editing behaviour.
     }
 
     document.addEventListener('keydown', function (e) {
         var key = e.keyCode;
-        var active = document.activeElement;
-        var onSelect = active && active.tagName === 'SELECT';
 
-        // Direction keys: move focus. Up/down on an open/selected dropdown
-        // should be left to the native control so options can be navigated.
+        // While the device list is open, route keys inside it.
+        if (deviceOpen) {
+            if (key === 40 || key === 38) {      // down / up: move highlight
+                e.preventDefault();
+                moveActive(key === 40 ? 1 : -1);
+                return;
+            }
+            if (key === 13) {                    // OK: choose highlighted option
+                e.preventDefault();
+                chooseActive();
+                return;
+            }
+            if (key === 461 || key === 8 || key === 27) { // Back / Exit / Esc
+                e.preventDefault();
+                closeDropdown();                 // exit the list
+                return;
+            }
+            if (key === 37 || key === 39) {      // left / right: exit list, continue page nav
+                closeDropdown();
+                // fall through to normal focus navigation
+            } else {
+                return;                          // swallow other keys while open
+            }
+        }
+
+        var active = document.activeElement;
+
+        // Direction keys: move focus.
         if (key === 38 || key === 40 || key === 37 || key === 39) {
-            if (onSelect && (key === 38 || key === 40)) { return; } // let native handle
             e.preventDefault();
             var idx = currentIndex();
             if (key === 38 || key === 37) { focusAt(idx - 1); }
@@ -310,16 +402,25 @@
 
         // OK / Enter: activate.
         if (key === 13) {
-            if (onSelect) { return; } // native: open dropdown
             e.preventDefault();
             activateFocused();
+            return;
+        }
+
+        // Back / Exit on the main page: nothing to undo, swallow it so it
+        // never closes the app unexpectedly.
+        if (key === 461 || key === 8) {
+            e.preventDefault();
             return;
         }
     });
 
     /* ---------------- wire up --------------------------------------- */
     els.scan.addEventListener('click', scanDevices);
-    els.device.addEventListener('change', onDeviceChange);
+    els.device.addEventListener('click', function () {
+        if (deviceOpen) { closeDropdown(); }
+        else { openDropdown(); }
+    });
     els.save.addEventListener('click', saveConfig);
     els.wake.addEventListener('click', wakeNow);
 

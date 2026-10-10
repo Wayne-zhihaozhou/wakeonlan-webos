@@ -16,10 +16,15 @@
             <div class="field">
                 <label for="device">选择要唤醒的设备</label>
                 <div class="row inline">
-                    <select id="device" class="grow" aria-label="选择设备"></select>
+                    <div class="dd grow" id="deviceWrap">
+                        <button type="button" id="device" class="dd-trigger"
+                                aria-haspopup="listbox" aria-expanded="false"
+                                aria-label="选择设备">—— 请选择设备 ——</button>
+                        <div class="dd-list" id="deviceList" role="listbox" aria-label="设备列表" hidden></div>
+                    </div>
                     <button id="btnScan" class="btn">扫描设备</button>
                 </div>
-                <p class="hint">用遥控器方向键选择设备、按 OK 确认；扫描会列出局域网内发现的电脑。</p>
+                <p class="hint">用遥控器方向键选择设备、按 OK 确认；扫描会列出局域网内发现的电脑。打开列表后按遥控器返回键可退出列表。</p>
             </div>
         </section>
 

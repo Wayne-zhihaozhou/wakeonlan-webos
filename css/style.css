@@ -75,8 +75,7 @@ label {
 }
 
 input[type="text"],
-input[type="number"],
-select {
+input[type="number"] {
     background: #0e141c;
     border: 1px solid #2a3948;
     border-radius: 8px;
@@ -86,24 +85,69 @@ select {
     width: 100%;
 }
 
-select {
+/* custom device dropdown (replaces native <select>, which is not
+   remote-friendly on webOS: its system popup swallows the Back key) */
+.dd {
+    position: relative;
+}
+
+.dd-trigger {
     appearance: none;
     -webkit-appearance: none;
+    background: #0e141c;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%238fa1b3'><path d='M7 10l5 5 5-5z'/></svg>");
     background-repeat: no-repeat;
     background-position: right 12px center;
+    border: 1px solid #2a3948;
+    border-radius: 8px;
+    color: #e8edf4;
+    font-size: 20px;
+    padding: 12px 14px;
     padding-right: 44px;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
 }
 
-select option {
+.dd-list {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    max-height: 320px;
+    overflow-y: auto;
     background: #0e141c;
+    border: 1px solid #2a3948;
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.dd-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font-size: 18px;
     color: #e8edf4;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 12px 14px;
+    cursor: pointer;
+}
+
+.dd-item:hover,
+.dd-item.focused {
+    background: #2f7dff;
+    color: #fff;
+    outline: none;
 }
 
 /* Visible focus ring so the TV remote can be followed on screen. */
-select:focus,
 input:focus,
 button:focus,
+.dd-trigger:focus,
 .switch:focus {
     outline: 3px solid #2f7dff;
     outline-offset: 2px;
