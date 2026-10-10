@@ -54,8 +54,13 @@ wakeonlan-webos/
 1. **后台服务（JS Service）**
    - 以 Node.js 进程在电视上后台运行，通过 `services.json` 注册到 webOS 总线，地址为
      `luna://com.woltv.wakeonlan.service`。
-   - 服务启动时（电视开机、服务被拉起时）读取配置：若 `enabled` 且 `sendOnBoot` 为真，
-     延迟 `bootDelayMs`（默认 15 秒，等网络就绪）后，用 `dgram` 向目标发送魔术包。
+   - **开机自动拉起的机制（重要）**：LG webOS 不会主动拉起第三方应用的 JS Service（它只在
+     打开应用 / 总线调用时才启动）。因此本项目用 webOS **Activity Manager**（`com.palm.activitymanager`）
+     注册了一个**持久化带触发器的 Activity**：电视开机、网络就绪（`connectionmanager` 状态变化）时
+     触发，回调直接调用 `wake` 方法发魔术包。持久化 Activity 存在 DB8，每次开机都会由系统自动重新武装，
+     从而无需打开应用即可实现「电视开机→电脑开机」。
+   - 服务进程被拉起后，会先并行读配置（短超时兜底），若 `enabled` 且 `sendOnBoot` 为真，网络一就绪
+     便立即用 `dgram` 发送魔术包（无固定延迟）。
    - 魔术包 = 6 字节 `0xFF` + 目标 MAC 重复 16 遍，发往 UDP 端口 9（可改 7）。
 2. **配置持久化（DB8）**
    - 用 `luna://com.palm.db`（DB8）存储 `com.woltv.wakeonlan:1` kind。
@@ -112,11 +117,12 @@ ares-log --device <设备名> com.woltv.wakeonlan.service
 
 - 本方案把自动发送放在 **JS Service**（后台进程）里，而不是放在网页应用里，因此
   **不会弹出任何界面**，符合「默认无弹窗后台执行」的需求。
-- webOS 会管理 JS Service 的生命周期，服务进程在设备启动 / 被拉起时运行。
-  **请在实际 LG 电视上验证**：开机后观察 `ares-log` 是否打印
-  `wol: service started; auto-sending magic packet in ...ms` 和
-  `wol: magic packet sent to ...`。若你的固件没有在开机时自动拉起该服务，
-  可先手动启动一次应用（`ares-launch`）以确认整套链路可用，再考虑进一步固化开机自启。
+- **开机自动发送依赖 Activity Manager 的持久化触发器，而不是「webOS 自动拉起服务」**。
+  首次在应用里**保存设置**时，后台服务会向 `com.palm.activitymanager` 注册一个持久化 Activity；
+  之后电视每次开机、网络一就绪即自动触发发送，无需再打开应用。界面状态栏会显示「开机自启已启用 ✓」。
+  验证：开机后观察 `ares-log` 应打印 `wol: boot auto-launch armed` 和 `wol: magic packet sent to ...`。
+  若固件权限较严导致 `create` 失败（打印 `boot auto-launch FAILED`），应用仍可手动唤醒（点「立即唤醒」），
+  可考虑改用「常开设备监测 TV 上线」方案（见 README 结尾说明）。
 
 ## 电脑（Win11）侧必备设置（否则发出去也开不了机）
 

@@ -25,7 +25,11 @@
 ## 3. 架构（怎么实现的）
 - **前端** `js/app.js`：设置界面，**完全支持遥控器操作**（方向键移动焦点 + OK 确认，webOS 要求 `PalmServiceBridge` 回调 `return true`，前端所有调用带超时兜底，打开时自动 `getStatus` 自检后台服务是否存活）。用 webOS 内置 `PalmServiceBridge` 调用后台服务，**无需 webOSTV.js**。
 - **后台 JS Service** `services/com.woltv.wakeonlan.service/wol_service.js`：Node.js 进程，在电视上后台跑。
-  - 服务启动（电视开机/被拉起）时读配置，若 `enabled && sendOnBoot`，**轮询等网络就绪后立即**（无固定延迟）用 Node `dgram` 发魔术包。
+  - **开机自动拉起 = webOS Activity Manager 持久化触发器**：LG webOS 不会主动拉起第三方应用的 JS Service
+    （懒启动，只在打开应用 / 总线调用时启动）。因此服务在保存设置时向 `com.palm.activitymanager` 注册一个
+    持久化（persist）带触发器的 Activity——电视开机、网络就绪（`connectionmanager/getStatus` 变化）时触发，
+    回调直接调 `wake` 发魔术包。持久化 Activity 存于 DB8，每次开机系统自动重新武装，无需打开应用。
+  - 服务进程被拉起后，若 `enabled && sendOnBoot`，**轮询等网络就绪后立即**（无固定延迟）用 Node `dgram` 发魔术包。
   - 魔术包 = 6×`0xFF` + 目标 MAC×16，发往 UDP 端口 9。
   - 配置存 DB8（`luna://com.palm.db`，kind `com.woltv.wakeonlan:1`，`private:true`，卸载即清）。**DB 调用均带超时 + 内存缓存兜底**，DB 挂起/损坏也绝不卡死界面或崩溃服务；启动阶段全程 try/catch，保证方法总能注册、服务必活。
 - 服务总线方法：`wake` / `getConfig` / `setConfig` / `getStatus` / **`scan`**（`services.json` 里声明）。
@@ -94,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员�
 | 打包警告 `requiredACG` | appinfo.json 里已加 `"requiredACG": []`。 |
 | 打包警告 Node 版本 | 服务代码已用 ES5 风格（`var`/回调），兼容旧 Node，可忽略。 |
 | 保存一直「保存中」或提示超时 | 旧版已修：DB 调用带超时+内存缓存、服务启动全程容错、前端回调 `return true`+12s 超时、打开时自检。若仍提示「后台服务无响应」，用 `ares-log` 看 `wol_service.js` 日志，或重启电视/重装。 |
-| 开机不自动唤醒电脑 | 检查 ① 应用里「开机自动发送」是否开 ② 电脑侧 `check-wol-win.ps1` 是否全 OK ③ 服务是否被开机拉起（`ares-log` 看 `service started`）。 |
+| 开机不自动唤醒电脑 | 检查 ① 应用里「开机自动发送」是否开且保存后状态栏显示「开机自启已启用 ✓」 ② 电脑侧 `check-wol-win.ps1` 是否全 OK ③ `ares-log` 是否打印 `wol: boot auto-launch armed` 与 `magic packet sent`。若打印 `boot auto-launch FAILED` 说明该固件对第三方 Activity Manager 权限较严，改用「常开设备监测 TV 上线」方案。 |
 
 ## 8. 编码 / 文件格式避坑（重要，改文件前必读）
 

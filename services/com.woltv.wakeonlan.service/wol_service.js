@@ -43,6 +43,30 @@ var startedAt = Date.now();
 var lastSend = { at: 0, ok: false, error: '' };
 
 /* ------------------------------------------------------------------ *
+ *  Boot auto-launch via the webOS Activity Manager
+ *  ------------------------------------------------------------------ *
+ *  On LG webOS a third-party JS service process is started *lazily*:
+ *  it only runs when the owning app is launched or a bus client calls it.
+ *  Nothing pulls it up at TV boot, so relying on `startBootAutosend()`
+ *  alone means the PC never wakes until the user opens the app.
+ *
+ *  Fix: register a *persistent* Activity (`luna://com.palm.activitymanager`)
+ *  that fires when the TV's network comes up after boot and whose callback
+ *  invokes our `wake` method. A persistent Activity lives in DB8 and is
+ *  re-armed by the Activity Manager on every boot, so the service is pulled
+ *  up automatically as soon as the TV is online — no app launch needed.
+ * ------------------------------------------------------------------ */
+var AM_URI = 'luna://com.palm.activitymanager';
+var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
+var bootAutoState = { armed: false, error: '', raw: '', trigger: '', diag: '' };
+// 不同 webOS 版本的连接管理服务名不同：新版用 com.webos.service.connectionmanager，
+// 旧版用 com.palm.connectionmanager。按顺序逐个尝试，直到 Activity 被成功受理。
+var BOOT_TRIGGER_METHODS = [
+    'luna://com.webos.service.connectionmanager/getStatus',
+    'luna://com.palm.connectionmanager/getStatus'
+];
+
+/* ------------------------------------------------------------------ *
  *  Config store
  *  ------------------------------------------------------------------ *
  *  Primary persistence is DB8 (luna://com.palm.db). But DB calls can hang
@@ -53,18 +77,27 @@ var lastSend = { at: 0, ok: false, error: '' };
  * ------------------------------------------------------------------ */
 var configCache = null; // in-memory fallback + fast path
 
-function dbCall(method, parameters, cb, timeoutMs) {
+function lunaCall(uri, method, parameters, cb, timeoutMs) {
     var called = false;
     var timer = setTimeout(function () {
-        if (!called) { called = true; cb({ returnValue: false, errorText: 'db timeout' }); }
+        if (!called) { called = true; cb({ returnValue: false, errorText: 'luna timeout' }); }
     }, timeoutMs || 5000);
     try {
-        service.call(DB_URI, { method: method, parameters: parameters }, function (message) {
+        // 关键修复：webos-service 的 call 需要【完整 URI 带方法名】+【原始 payload】。
+        // 不能传 `{method, parameters}` 包装——那会被原样当作 payload 发给一个没有
+        // 方法名的地址（如 luna://com.palm.activitymanager），导致系统报
+        // “url 不是一个有效网址”（DB 调用此前也因此一直在静默失败，只是被
+        // saveConfig 的“失败也报成功、退回内存”逻辑掩盖了）。
+        service.call(uri + '/' + method, parameters, function (message) {
             if (!called) { called = true; clearTimeout(timer); cb(message.payload || { returnValue: false }); }
         });
     } catch (e) {
         if (!called) { called = true; clearTimeout(timer); cb({ returnValue: false, errorText: String(e && e.message || e) }); }
     }
+}
+
+function dbCall(method, parameters, cb, timeoutMs) {
+    lunaCall(DB_URI, method, parameters, cb, timeoutMs);
 }
 
 function ensureKind(cb) {
@@ -142,6 +175,108 @@ function saveConfig(cfg, cb) {
         }
         doPut();
     });
+}
+
+/* ------------------------------------------------------------------ *
+ *  Boot auto-launch management (Activity Manager)
+ *  ------------------------------------------------------------------ *
+ *  Arming creates (or replaces) a persistent, background Activity whose
+ *  trigger fires when the TV's network comes up and whose callback invokes
+ *  our `wake` method. Because the Activity is persistent, the Activity
+ *  Manager re-arms it on every TV boot, so our service gets pulled up and
+ *  sends the magic packet as soon as the TV is online — no app launch.
+ * ------------------------------------------------------------------ */
+function setBootAuto(enabled, cb) {
+    var done = cb || function () {};
+    if (!enabled) {
+        lunaCall(AM_URI, 'cancel', { name: BOOT_ACTIVITY_NAME }, function (res) {
+            // A "not found" is fine here (already disabled).
+            bootAutoState.armed = false;
+            bootAutoState.error = '';
+            bootAutoState.raw = '';
+            bootAutoState.trigger = '';
+            bootAutoState.diag = '';
+            console.log('wol: boot auto-launch disabled');
+            done(null);
+        }, 6000);
+        return;
+    }
+
+    // 尝试用不同版本的连接管理器地址逐个创建 Activity，直到成功或全部失败。
+    var tried = 0;
+    var lastRes = {};
+
+    function tryTrigger(index) {
+        if (index >= BOOT_TRIGGER_METHODS.length) {
+            // 全部持久化地址都失败 -> 追加一次「非持久化」诊断，用于区分
+            // 「url 无效」到底是触发器地址问题，还是 persist 权限被固件拒绝。
+            runDiag();
+            return;
+        }
+        var triggerUri = BOOT_TRIGGER_METHODS[index];
+        createActivity(triggerUri, true, function (res) {
+            tried++;
+            lastRes = res || {};
+            bootAutoState.raw = JSON.stringify(lastRes);
+            console.log('wol: activity create [' + tried + '] trigger=' + triggerUri +
+                ' -> ' + JSON.stringify(lastRes));
+            if (lastRes.returnValue) {
+                bootAutoState.armed = true;
+                bootAutoState.error = '';
+                bootAutoState.trigger = triggerUri;
+                console.log('wol: boot auto-launch ARMED via ' + triggerUri);
+                done(null);
+                return;
+            }
+            // 记录当前失败（保留最近一次错误），继续尝试下一个触发器地址。
+            bootAutoState.armed = false;
+            bootAutoState.error = (lastRes.errorText || lastRes.error) || 'activity create failed';
+            console.log('wol: boot auto-launch attempt [' + tried + '] FAILED (' +
+                bootAutoState.error + ')');
+            tryTrigger(index + 1);
+        });
+    }
+
+    function createActivity(triggerUri, persist, cb) {
+        var type = persist ? { background: true, persist: true } : { background: true };
+        lunaCall(AM_URI, 'create', {
+            activity: {
+                name: BOOT_ACTIVITY_NAME,
+                description: 'Wake-on-LAN: send magic packet when TV boots and network is up',
+                type: type,
+                trigger: { method: triggerUri, params: { subscribe: true } },
+                callback: { method: 'luna://com.woltv.wakeonlan.service/wake' }
+            },
+            replace: true,   // idempotent: safe to call again
+            start: true,     // eligible to run as soon as the trigger fires
+            subscribe: true  // keep it alive / adoptable
+        }, cb, 6000);
+    }
+
+    function runDiag() {
+        // 用第一个触发器地址、去掉 persist，看是否就能创建成功。
+        var triggerUri = BOOT_TRIGGER_METHODS[0];
+        createActivity(triggerUri, false, function (res) {
+            var ok = !!(res && res.returnValue);
+            if (ok) {
+                // 非持久能建、持久不能建 -> 是 persist 权限问题，不是 URL 问题。
+                bootAutoState.diag = '非持久 Activity 可正常创建 → 疑为固件禁止第三方持久化触发器（url 报错为误判）';
+            } else {
+                bootAutoState.diag = '去掉 persist 仍失败（' +
+                    ((res && (res.errorText || res.error)) || '同错') +
+                    '）→ trigger/callback 地址本身被拒';
+            }
+            console.log('wol: diag (non-persist) trigger=' + triggerUri +
+                ' -> ' + JSON.stringify(res || {}) + ' ; ' + bootAutoState.diag);
+            // 诊断用的非持久 Activity 只用于探测，成功则立刻取消，不残留。
+            if (ok) {
+                lunaCall(AM_URI, 'cancel', { name: BOOT_ACTIVITY_NAME }, function () {}, 6000);
+            }
+            done(new Error(bootAutoState.error || 'activity create failed'));
+        });
+    }
+
+    tryTrigger(0);
 }
 
 /* ------------------------------------------------------------------ *
@@ -412,6 +547,10 @@ function startBootAutosend() {
                 configCache = JSON.parse(JSON.stringify(sendCfg));
             }
             realCfgLoaded = true;
+            // Re-arm the persistent boot Activity to match the stored config.
+            // (replace:true makes this idempotent, and it self-heals if the
+            // Activity was ever lost.)
+            setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
         }, 4000);
     } catch (e) {
         realCfgLoaded = true; // never let an exception stall the fallback
@@ -503,7 +642,11 @@ service.register('setConfig', function (message) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
                 console.log('wol: config saved: mac=' + saved.mac + ' ip=' + saved.ip + ' port=' + saved.port);
-                message.respond({ returnValue: true, config: saved });
+                // 让 UI 看到本次保存后真实的开机自启结果：等 setBootAuto 完成后再响应，
+                // 否则界面会显示上一次（可能是旧的失败）状态。
+                setBootAuto(!!(saved.enabled && saved.sendOnBoot), function () {
+                    message.respond({ returnValue: true, config: saved, bootAuto: bootAutoState });
+                });
             }
         });
     } catch (e) {
@@ -518,7 +661,19 @@ service.register('getStatus', function (message) {
         uptimeMs: Date.now() - startedAt,
         lastSend: lastSend,
         networkReady: networkReady(),
-        localIp: getLocalIpv4()
+        localIp: getLocalIpv4(),
+        bootAuto: bootAutoState
+    });
+});
+
+service.register('setBootAuto', function (message) {
+    var p = message.payload || {};
+    setBootAuto(!!p.enabled, function (err) {
+        if (err) {
+            message.respond({ returnValue: false, errorText: err.message });
+        } else {
+            message.respond({ returnValue: true, armed: bootAutoState.armed });
+        }
     });
 });
 

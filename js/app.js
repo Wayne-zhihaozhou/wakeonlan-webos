@@ -303,6 +303,15 @@
             mac.replace(/[^0-9a-fA-F]/g, '').length === 12;
     }
 
+    function bootAutoTxt(ba) {
+        if (!ba) { return ''; }
+        if (ba.armed) { return '，开机自启已启用 ✓'; }
+        var s = '，⚠ 开机自启启用失败';
+        if (ba.error) { s += '（' + ba.error + '）'; }
+        if (ba.diag) { s += '；诊断：' + ba.diag; }
+        return s;
+    }
+
     function saveConfig() {
         var cfg = readForm();
         if (!validMac(cfg.mac)) {
@@ -311,8 +320,8 @@
         }
         setStatus('保存中…');
         callService('setConfig', cfg)
-            .then(function () {
-                setStatus('已保存 ✓', 'ok');
+            .then(function (res) {
+                setStatus('已保存 ✓' + bootAutoTxt(res && res.bootAuto), 'ok');
             })
             .catch(showError);
     }
@@ -474,7 +483,8 @@
     // 后台服务自检：getStatus 不依赖 DB，若它也超时说明服务进程没起来/崩了。
     callService('getStatus', {}, 6000)
         .then(function (res) {
-            setStatus('后台服务正常' + (res.localIp ? '，本机 ' + res.localIp : '') + '。', 'ok');
+            setStatus('后台服务正常' + (res.localIp ? '，本机 ' + res.localIp : '') +
+                bootAutoTxt(res && res.bootAuto) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');

@@ -27,6 +27,11 @@
                     "public": true
                 },
                 {
+                    "name": "setBootAuto",
+                    "description": "Enable/disable the persistent boot auto-launch activity",
+                    "public": true
+                },
+                {
                     "name": "scan",
                     "description": "Scan LAN and list discovered devices (ip + mac)",
                     "public": true
