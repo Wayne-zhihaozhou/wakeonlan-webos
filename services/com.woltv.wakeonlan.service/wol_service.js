@@ -4,8 +4,11 @@
  * Runs as a Node.js JS Service in the background on the TV.
  * - 开机自动唤醒：电视开机后（服务被 Activity Manager 的多条件触发器拉起），
  *   在 90 秒窗口内每 2 秒循环发送一次 Wake-on-LAN 魔术包（UDP），确保电脑收到。
- *   多触发源（tvpower/powerState、connectionmanager/getStatus、displayStatus）
- *   任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性。
+ *   多触发源（tvpower/powerState、connectionmanager/getStatus、displayStatus、
+ *   screenState）任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性。
+ *   关键：常驻服务另设【屏幕状态看护 + 轮询看护】，靠「屏幕灭→亮」边沿触发——
+ *   即使开启「即时开机 / Quick Start+」导致 powerState 在短待机时不变化，屏幕也
+ *   一定在每次开机时由灭变亮，因此【每次开机（含短待机唤醒）】都能发送魔术包。
  * - Registers bus methods used by the front-end app:
  *     wake       -> send a magic packet now
  *     getConfig  -> return stored config
@@ -61,6 +64,13 @@ var DEFAULT_CONFIG = {
     ip: '255.255.255.255',  // 广播地址；也可填电脑的固定 IP（单播更稳）
     port: 9,                // WoL standard port
     broadcast: true,        // set UDP broadcast flag when sending
+    // 发送节奏：服务进程存活期间，每 sendIntervalSec 秒持续发送一次魔术包
+    // （死循环，不依赖任何触发信号），确保「电视一直发」。默认 1 秒。
+    sendIntervalSec: 1,
+    // 拉起节奏：持久化周期 Activity 每 pullIntervalSec 秒主动拉起本服务一次。
+    // 这是「开机后服务没被拉起」的根治手段——无论电视开机/唤醒/快速启动，
+    // 周期 Activity 都会定时把服务拉起来，不依赖 powerState/屏幕触发器。
+    pullIntervalSec: 20,
     // 日志转发：服务每打一行 console.log 就通过 UDP 推到局域网内电脑的
     // logHost:logPort，方便在电脑上看日志而不是在电视上翻。默认关闭。
     logForward: false,      // 是否把服务日志转发到电脑
@@ -92,7 +102,7 @@ var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
 // lastWol: 最近一次开机唤醒的结果，用于在 UI 状态栏显示——
 // none=服务启动后还未发过包；sent=已发出魔术包；error=发送失败；done=90 秒窗口已结束。
 // armed: 至少一个开机触发器 Activity 成功武装；triggers: 各触发源武装结果。
-var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: '', resumeFires: 0, triggers: {} };
+var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: '', resumeFires: 0, screenOnFires: 0, triggers: {} };
 
 /*
  * 开机触发源列表（多条件、任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性）。
@@ -103,10 +113,14 @@ var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: 
  *                作为「彻底断电/完全关机再开机」的兜底（此时网络是就绪的最可靠信号）。
  *   - display  : com.webos.service.systemservice/displayStatus  屏幕显示状态变化，
  *                直接反映「屏幕亮起」这个时刻。
+ *   - screen   : com.webos.service.tvpower/screenState  屏幕亮/灭变化。即使开启
+ *                「即时开机/Quick Start+」导致 powerState 在短待机时不变化，屏幕
+ *                也一定会在每次开机时由灭变亮，因此这是【每次开机】都可靠的冷启动源。
  * 任一 Activity 触发都会拉起服务并调用 wake，多个触发源互为冗余——只要有一个可用就能唤醒，
  * 显著降低「单一触发器在特定固件/场景下不触发」导致电脑不醒的风险。
- * 注意：displayStatus / connectionmanager 等是否对第三方 Activity 可订阅取决于固件 ACG 权限，
- * 需真机验证；个别源武装失败会记录到 bootAutoState.triggers，不影响其它成功者。
+ * 注意：displayStatus / connectionmanager / screenState 等是否对第三方 Activity 可订阅
+ * 取决于固件 ACG 权限，需真机验证；个别源武装失败会记录到 bootAutoState.triggers，
+ * 不影响其它成功者。服务常驻后由 screenWatch + 轮询看护负责「短待机唤醒」的检测。
  */
 var BOOT_TRIGGERS = [
     {
@@ -129,6 +143,13 @@ var BOOT_TRIGGERS = [
         method: 'luna://com.webos.service.systemservice/displayStatus',
         params: { subscribe: true },
         desc: 'Screen display status change (screen on)'
+    },
+    {
+        key: 'screen',
+        name: BOOT_ACTIVITY_NAME + '.screen',
+        method: 'luna://com.webos.service.tvpower/screenState',
+        params: { subscribe: true },
+        desc: 'TV screen state change (screen on)'
     }
 ];
 
@@ -164,6 +185,99 @@ var powerWatch = {
     resumeFires: 0     // 检测到的「非开机→开机」边沿次数
 };
 
+/*
+ * 屏幕状态看护（screenWatch）。
+ * ------------------------------------------------------------------
+ * 关键修复：仅靠 powerState 的 Standby→Active 边沿在「即时开机 / Quick Start+」
+ * 下不可靠——短待机时电视并不真正断电，powerState 全程停在 Active，根本不发生
+ * 边沿，于是基于边沿的触发永远等不到，电脑就不会被唤醒（用户实测：遥控关机后
+ * 短时间内再开不触发，关 1 小时后才触发）。
+ *
+ * 真正在【每次】唤醒（无论长短待机、是否 Quick Start+）都会变化的是【屏幕状态】：
+ * 待机/睡眠时屏幕是关的，一开机屏幕就亮。screenState（tvpower）与 displayStatus
+ * （systemservice）都能反映屏幕亮/灭。本服务通过 keep-alive 常驻，短待机期间进程
+ * 不退出，因此能稳定订阅到「屏幕灭→亮」的边沿并触发发送——这正是短待机唤醒时
+ * 之前漏掉的关键信号。
+ * ------------------------------------------------------------------ */
+var screenWatch = {
+    active: false,
+    subs: [],            // 所有屏幕相关订阅句柄
+    lastOn: false,       // 最近一次是否「屏幕亮」
+    sawFirst: false,     // 是否已收到过第一条屏幕状态（用于跳过首次快照）
+    fires: 0             // 检测到的「屏幕灭→亮」边沿次数
+};
+
+function isScreenOn(val) {
+    var s = String(val || '').toLowerCase();
+    return s === 'on' || s === 'active' || s === 'screen_on' || s === 'picture_on' ||
+           s === 'true' || s === '1';
+}
+
+// 统一的「电视刚被唤醒」入口：无论来自 powerState 边沿还是屏幕亮起边沿，
+// 都走这里。内部 bootLoopRunning 防抖保证同一进程内不重复。
+function fireWakeEvent(source) {
+    try { startBootAutosend(); } catch (e) {
+        console.log('wol: ' + source + ' wake event error: ' + e);
+    }
+}
+
+function handleScreenOn() {
+    screenWatch.fires++;
+    bootAutoState.screenOnFires = screenWatch.fires;
+    console.log('wol: screen turned ON (screen edge #' + screenWatch.fires +
+        '); starting boot send loop');
+    fireWakeEvent('screen');
+}
+
+// 处理 screenState 订阅消息（com.webos.service.tvpower/screenState）
+function handleScreenStateMessage(message) {
+    var payload = (message && message.payload) || {};
+    if (payload.returnValue === false) {
+        console.log('wol: screenState subscribe error: ' +
+            (payload.errorText || payload.error || 'unknown'));
+        return;
+    }
+    var val = payload.screenState !== undefined ? payload.screenState : payload.state;
+    if (val === undefined || val === null) { return; }
+    var on = isScreenOn(val);
+    console.log('wol: screenState = ' + val + (on ? ' (on)' : ' (off)'));
+    if (screenWatch.sawFirst) {
+        // 只有在已经看到过屏幕状态、且确实发生了「灭→亮」边沿时才触发，
+        // 避免订阅建立时的首次快照被误当成一次唤醒。
+        if (on && !screenWatch.lastOn) {
+            handleScreenOn();
+        }
+    } else {
+        screenWatch.sawFirst = true;
+        console.log('wol: screenState initial snapshot (no send): ' + val);
+    }
+    screenWatch.lastOn = on;
+}
+
+// 处理 displayStatus 订阅消息（com.webos.service.systemservice/displayStatus）
+function handleDisplayStatusMessage(message) {
+    var payload = (message && message.payload) || {};
+    if (payload.returnValue === false) {
+        console.log('wol: displayStatus subscribe error: ' +
+            (payload.errorText || payload.error || 'unknown'));
+        return;
+    }
+    // displayStatus 常见字段：status = "Screen On"/"Screen Off"，或 state。
+    var raw = payload.status !== undefined ? payload.status : payload.state;
+    if (raw === undefined || raw === null) { return; }
+    var on = isScreenOn(raw);
+    console.log('wol: displayStatus = ' + raw + (on ? ' (on)' : ' (off)'));
+    if (screenWatch.sawFirst) {
+        if (on && !screenWatch.lastOn) {
+            handleScreenOn();
+        }
+    } else {
+        screenWatch.sawFirst = true;
+        console.log('wol: displayStatus initial snapshot (no send): ' + raw);
+    }
+    screenWatch.lastOn = on;
+}
+
 function isActivePowerState(s) {
     return String(s || '').toLowerCase() === 'active';
 }
@@ -190,15 +304,23 @@ function handlePowerStateMessage(message) {
             bootAutoState.resumeFires = powerWatch.resumeFires;
             console.log('wol: TV resume detected (' + prev + ' -> ' + state +
                 '); starting boot send loop');
-            // 与 AM 触发器走同一个入口；内部 bootLoopRunning 防抖保证不重复。
-            try { startBootAutosend(); } catch (e) {
-                console.log('wol: resume boot send error: ' + e);
-            }
+            fireWakeEvent('power');
         }
     } else {
         console.log('wol: powerState = ' + state +
             (prev ? ' (unchanged)' : ' (initial, no send)'));
     }
+}
+
+// 订阅一个 luna 方法（屏状态），返回是否成功订阅。
+function subscribeScreenMethod(uri, method, handler) {
+    try {
+        var sub = service.subscribe(uri + '/' + method, { subscribe: true }, handler);
+        if (sub) { screenWatch.subs.push(sub); return true; }
+    } catch (e) {
+        console.log('wol: screen subscribe error (' + uri + '/' + method + '): ' + e);
+    }
+    return false;
 }
 
 function startPowerWatch() {
@@ -220,51 +342,105 @@ function startPowerWatch() {
         powerWatch.active = false;
         console.log('wol: powerState watch start error: ' + e);
     }
+
+    // 新增：屏幕状态看护（短待机唤醒的关键信号）。订阅多个可能的屏幕状态源，
+    // 任一可用即可；个别源失败不影响其它源。
+    if (screenWatch.active) { return; }
+    screenWatch.active = true;
+    var s1 = subscribeScreenMethod('luna://com.webos.service.tvpower', 'screenState', handleScreenStateMessage);
+    var s2 = subscribeScreenMethod('luna://com.webos.service.systemservice', 'displayStatus', handleDisplayStatusMessage);
+    console.log('wol: screen watch ' +
+        ((s1 ? 'screenState ok ' : 'screenState FAIL ') +
+         (s2 ? 'displayStatus ok' : 'displayStatus FAIL')) +
+        ' (any is enough for warm-resume wake)');
+
+    // 订阅建立后立刻开始轮询看护（见 startScreenPoll）。
+    startScreenPoll();
 }
 
 /* ------------------------------------------------------------------ *
- *  Keep-alive（服务常驻）—— 方向 1
+ *  屏幕/电源轮询看护（订阅失效时的兜底）
  *  ------------------------------------------------------------------ *
- *  让服务进程被 Activity Manager 持续持有而不退出，从而 startPowerWatch 的
- *  powerState 直连订阅能一直监听，待机唤醒时抓得到边沿。
- *  做法：create 一个无触发器、start:true 的持久化后台 Activity，然后 adopt 它，
- *  使本服务进程成为该 Activity 的 parent（Activity 存活期间 parent 进程被持有）。
+ *  某些固件上第三方服务订阅 screenState / displayStatus 可能被 ACG 拒绝，
+ *  导致上面的屏幕订阅一个都建立不起来。作为兜底，常驻服务每隔一段时间主动
+ *  查询一次「屏幕是否亮着」：如果上一轮是灭、这一轮是亮，就认为发生了一次
+ *  唤醒并触发发送。这样即使订阅全失败，短待机唤醒依然能被抓到。
  * ------------------------------------------------------------------ */
-var keepAliveStarted = false;
-function startKeepAlive() {
-    if (keepAliveStarted) { return; }
-    keepAliveStarted = true;
-    try {
-        lunaCall(AM_URI, 'create', {
-            activity: {
-                name: KEEPALIVE_ACTIVITY_NAME,
-                description: 'Keep WOL service resident to watch powerState for warm-resume wake',
-                type: { background: true, persist: true }
-            },
-            replace: true,
-            start: true,
-            subscribe: true
-        }, function (res) {
-            var aid = res && res.activityId;
-            if (res && res.returnValue && aid) {
-                // Adopt it so the service process becomes the Activity parent and stays resident.
-                lunaCall(AM_URI, 'adopt', {
-                    activityId: aid,
-                    wait: false,
-                    subscribe: true
-                }, function (res2) {
-                    console.log('wol: keepalive adopt ' +
-                        ((res2 && res2.returnValue) ? 'OK (service resident)' : 'FAILED (' + (res2 && (res2.errorText || res2.error)) + ')'));
-                }, 6000);
-            } else {
-                console.log('wol: keepalive create ' +
-                    ((res && res.returnValue) ? 'created' : 'FAILED (' + (res && (res.errorText || res.error)) + ')'));
-            }
-        }, 6000);
-    } catch (e) {
-        console.log('wol: keepalive start error: ' + e);
+var SCREEN_POLL_INTERVAL_MS = 10000;  // 每 10 秒查一次（常驻服务，开销极低）
+var screenPollTimer = null;
+var pollLastScreenOn = null;          // null=尚未获得首条真实值
+var pollFirstSeen = false;
+
+function queryScreenState(cb) {
+    // 依次尝试 screenState / displayStatus / powerState，取第一个能返回有效值的。
+    var tried = 0;
+    var sources = [
+        { uri: 'luna://com.webos.service.tvpower', method: 'screenState', extract: function (p) {
+            var v = p.screenState !== undefined ? p.screenState : p.state;
+            return v === undefined ? null : { on: isScreenOn(v), raw: v };
+        }},
+        { uri: 'luna://com.webos.service.systemservice', method: 'displayStatus', extract: function (p) {
+            var v = p.status !== undefined ? p.status : p.state;
+            return v === undefined ? null : { on: isScreenOn(v), raw: v };
+        }},
+        { uri: 'luna://com.webos.service.tvpower', method: 'powerState', extract: function (p) {
+            var v = p.powerState;
+            return v === undefined ? null : { on: isActivePowerState(v), raw: v, isPower: true };
+        }}
+    ];
+    function next() {
+        if (tried >= sources.length) { cb(null); return; }
+        var src = sources[tried++];
+        try {
+            lunaCall(src.uri, src.method, { subscribe: false }, function (res) {
+                if (res && res.returnValue) {
+                    var r = src.extract(res);
+                    if (r) { cb(r); return; }
+                }
+                next();
+            }, 2500);
+        } catch (e) { next(); }
     }
+    next();
 }
+
+function startScreenPoll() {
+    if (screenPollTimer) { return; }
+    screenPollTimer = setInterval(function () {
+        queryScreenState(function (r) {
+            if (!r) { return; } // 全失败，跳过这一轮
+            if (!pollFirstSeen) {
+                pollFirstSeen = true;
+                pollLastScreenOn = r.on;
+                console.log('wol: poll initial screen=' + r.raw + (r.isPower ? ' (powerState)' : ''));
+                return;
+            }
+            // 上一轮灭、这一轮亮 -> 唤醒
+            if (r.on && !pollLastScreenOn) {
+                console.log('wol: poll detected wake (screen ' +
+                    (pollLastScreenOn === null ? 'unknown' : 'off') + ' -> ' + r.raw + ')');
+                handleScreenOn();
+            }
+            pollLastScreenOn = r.on;
+        });
+    }, SCREEN_POLL_INTERVAL_MS);
+    console.log('wol: screen poll watchdog started (every ' +
+        (SCREEN_POLL_INTERVAL_MS / 1000) + 's)');
+}
+
+/* ------------------------------------------------------------------ *
+ *  周期拉起（服务常驻 & 死循环拉起）—— 根治「开机不拉起」
+ *  ------------------------------------------------------------------ *
+ *  webOS 的第三方 JS 服务进程是懒启动的：只有 (a) 有总线客户端调用它，或
+ *  (b) Activity Manager 拉起它，进程才会起来。用户实测遥控开机（短待机/
+ *  快速启动）后服务没被拉起、powerState/屏幕触发器都不触发——这是病根。
+ *
+ *  方案：在 setBootAuto() 中武装一个【带周期 schedule 的持久化 Activity】，
+ *  它不依赖任何电源/屏幕信号，而是每 pullIntervalSec 秒主动调用本服务的
+ *  `wake` 方法（拉起进程并启动持续发送循环），并 adopt 使其常驻。等价于
+ *  系统层的「死循环」——电视只要开机，无论处于什么电源状态，服务都会在几秒
+ *  内被拉起来并持续发送魔术包，先保证电脑一定能被唤醒。
+ * ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ *
  *  Config store
@@ -321,6 +497,10 @@ function normalizeConfig(c) {
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
         port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
         broadcast: c ? c.broadcast !== false : true,
+        sendIntervalSec: (c && typeof c.sendIntervalSec === 'number' && c.sendIntervalSec >= 1)
+            ? c.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec,
+        pullIntervalSec: (c && typeof c.pullIntervalSec === 'number' && c.pullIntervalSec >= 5)
+            ? c.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec,
         logForward: c ? c.logForward !== false : false,
         logHost: (c && c.logHost) || DEFAULT_CONFIG.logHost,
         logPort: (c && typeof c.logPort === 'number') ? c.logPort : DEFAULT_CONFIG.logPort
@@ -401,6 +581,10 @@ function saveConfig(cfg, cb) {
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
         obj.broadcast = cfg.broadcast !== false;
+        obj.sendIntervalSec = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
+            ? cfg.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
+        obj.pullIntervalSec = (typeof cfg.pullIntervalSec === 'number' && cfg.pullIntervalSec >= 5)
+            ? cfg.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec;
         obj.logForward = cfg.logForward !== false;
         obj.logHost = (cfg.logHost || DEFAULT_CONFIG.logHost).toString();
         obj.logPort = typeof cfg.logPort === 'number' ? cfg.logPort : DEFAULT_CONFIG.logPort;
@@ -471,8 +655,9 @@ function setBootAuto(enabled, cb) {
         return;
     }
 
-    // 为每个触发源逐个武装；记录每个的结果，全部完成后回填总状态。
-    var remaining = BOOT_TRIGGERS.length;
+    // 为每个触发源逐个武装 + 武装周期拉起 Activity；记录每个的结果，全部完成后回填总状态。
+    var pullKey = 'pull';
+    var remaining = BOOT_TRIGGERS.length + 1; // +1 是周期拉起 Activity
     var anyArmed = false;
     var lastError = '';
 
@@ -481,8 +666,9 @@ function setBootAuto(enabled, cb) {
         bootAutoState.armed = anyArmed;
         bootAutoState.error = anyArmed ? '' : (lastError || 'all triggers failed');
         console.log('wol: boot auto-launch ' +
-            (anyArmed ? 'ARMED (' + (BOOT_TRIGGERS.length - countFailed()) + '/' + BOOT_TRIGGERS.length + ' triggers)' :
-                        'FAILED (all triggers: ' + bootAutoState.error + ')'));
+            (anyArmed ? 'ARMED (triggers ' + (BOOT_TRIGGERS.length - countFailed()) + '/' + BOOT_TRIGGERS.length +
+                        ' + pull ' + (bootAutoState.triggers[pullKey] && bootAutoState.triggers[pullKey].armed ? 'OK' : 'FAIL') + ')' :
+                        'FAILED (all: ' + bootAutoState.error + ')'));
         done(anyArmed ? null : new Error(bootAutoState.error));
     }
 
@@ -494,6 +680,45 @@ function setBootAuto(enabled, cb) {
         }
         return n;
     }
+
+    // 周期拉起 Activity：不依赖任何电源/屏幕信号，每 pullIntervalSec 秒主动拉起
+    // 本服务（回调 wake -> 拉起进程并启动持续发送循环）。这是「开机不拉起」的
+    // 根治手段。precise:true 表示不使用智能对齐间隔，按精确 interval 触发。
+    var pullInterval = (configCache && typeof configCache.pullIntervalSec === 'number')
+        ? configCache.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec;
+    if (pullInterval < 5) { pullInterval = 5; }
+    lunaCall(AM_URI, 'create', {
+        activity: {
+            name: KEEPALIVE_ACTIVITY_NAME,
+            description: 'Periodically pull up WOL service to send magic packets on every TV power-on',
+            type: { background: true, persist: true },
+            schedule: { interval: pullInterval + 's', precise: true },
+            callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromPull: true, source: pullKey } }
+        },
+        replace: true,
+        start: true,
+        subscribe: true
+    }, function (res) {
+        var ok = !!(res && res.returnValue);
+        var pullAid = res && res.activityId;
+        bootAutoState.triggers[pullKey] = {
+            armed: ok,
+            error: ok ? '' : ((res && (res.errorText || res.error)) || 'pull activity create failed')
+        };
+        if (ok) { anyArmed = true; } else { lastError = bootAutoState.triggers[pullKey].error; }
+        console.log('wol: pull[' + pullKey + '] ' +
+            (ok ? 'ARMED (every ' + pullInterval + 's)' : 'FAILED (' + bootAutoState.triggers[pullKey].error + ')'));
+        // 立即 adopt 该周期 Activity：使本服务进程成为其 parent 而常驻，这样
+        // 持续发送循环在两次拉起之间不会断（进程不退出）。
+        if (ok && pullAid) {
+            lunaCall(AM_URI, 'adopt', { activityId: pullAid, wait: false, subscribe: true }, function (res2) {
+                console.log('wol: pull adopt ' +
+                    ((res2 && res2.returnValue) ? 'OK (service resident)' : 'FAILED (' + (res2 && (res2.errorText || res2.error)) + ')'));
+            }, 6000);
+        }
+        remaining--;
+        maybeFinish();
+    }, 6000);
 
     BOOT_TRIGGERS.forEach(function (trg) {
         lunaCall(AM_URI, 'create', {
@@ -751,80 +976,81 @@ function sendMagicPacket(cfg, cb) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Service entry point: auto-send at boot
+ *  Service entry point: 持续发送（死循环）
  * ------------------------------------------------------------------ *
- *  开机后不做任何检测（网络就绪 / 电源状态都不管），直接进入 90 秒发送窗口，
- *  每 2 秒循环发送一次魔术包，确保电脑一定能收到。用进程级防抖避免 Activity
- *  反复拉起服务、每次都从头重发、浪费窗口。
+ *  只要服务进程存活，就【一直发魔术包】，不做任何检测、不设窗口、永不自动停止。
+ *  每 sendIntervalSec 秒发一次（默认 1 秒），配合周期拉起 Activity（pull 触发器）
+ *  保证：电视一开机服务就被拉起来，起来后立刻持续发——彻底绕开 powerState /
+ *  屏幕触发器「短待机不触发」的问题，先保证电脑一定能被唤醒。
+ *
+ *  进程级防抖 bootLoopRunning：服务被周期 Activity / AM 触发器反复拉起时，每次
+ *  service registered 都会重新走 startBootAutosend。若发送循环已在本进程跑着，
+ *  就跳过，避免重复起循环。
  * ------------------------------------------------------------------ */
-var BOOT_SEND_WINDOW_MS = 90000;      // 开机后 90 秒的发送窗口
-var BOOT_SEND_INTERVAL_MS = 2000;     // 窗口期内每 2 秒重发一次魔术包
-var bootLoopRunning = false;          // 进程级防抖：同进程只跑一轮开机发送
+var bootLoopRunning = false;          // 进程级防抖：同进程只跑一个持续发送循环
 
 function startBootAutosend() {
     var sendCfg = configCache ? JSON.parse(JSON.stringify(configCache))
                               : JSON.parse(JSON.stringify(DEFAULT_CONFIG));
 
-    // 从 DB 取真实配置（失败或超时就用默认配置），随后启动循环发送。
+    // 从 DB 取真实配置（失败或超时就用默认配置），随后启动持续发送循环。
     try {
         dbCall('find', { query: { from: KIND } }, function (res) {
             if (res && res.returnValue && res.results && res.results.length) {
                 sendCfg = normalizeConfig(res.results[0]);
                 configCache = JSON.parse(JSON.stringify(sendCfg));
             }
-            // 进程级防抖：电视开机后 Activity 触发器可能把本服务拉起多次（每次
-            // service registered 都会再跑 startBootAutosend）。若发送循环已在
-            // 本进程跑着，就忽略这次，避免重复从头发送 / 反复重建 Activity
-            // 造成自触发循环（日志里曾看到 service registered 连续出现 3 次）。
+            // 进程级防抖：电视开机后周期 Activity / AM 触发器可能把本服务拉起
+            // 多次（每次 service registered 都会再跑 startBootAutosend）。若发送
+            // 循环已在本进程跑着，就忽略这次，避免重复从头发送 / 反复重建
+            // Activity 造成自触发循环。
             if (bootLoopRunning) {
-                console.log('wol: boot loop already running in this process; skip re-arm');
+                console.log('wol: continuous loop already running in this process; skip re-arm');
                 return;
             }
-            // Re-arm the persistent boot Activities (one per trigger source) to
-            // match the stored config. (replace:true makes this idempotent, and
-            // it self-heals if an Activity was ever lost.)
+            // Re-arm the persistent pull/trigger Activities to match stored config.
+            // (replace:true makes this idempotent, and it self-heals if lost.)
+            // 周期拉起 Activity 已并入 setBootAuto：只要启用，无论电源/屏幕信号，
+            // 都会每 pullIntervalSec 秒定时拉起本服务。
             setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
-            runBootSendLoop(sendCfg);
+            runContinuousSendLoop(sendCfg);
         }, 4000);
     } catch (e) {
-        runBootSendLoop(sendCfg);
+        runContinuousSendLoop(sendCfg);
     }
 }
 
-function runBootSendLoop(cfg) {
-    if (bootLoopRunning) { return; }   // 同一进程只跑一轮
+function runContinuousSendLoop(cfg) {
+    if (bootLoopRunning) { return; }   // 同一进程只跑一个持续发送循环
     bootLoopRunning = true;
 
     if (!(cfg.enabled && cfg.sendOnBoot)) {
-        console.log('wol: boot auto-send disabled (enabled=' + cfg.enabled +
+        console.log('wol: continuous send disabled (enabled=' + cfg.enabled +
             ', sendOnBoot=' + cfg.sendOnBoot + ')');
         bootLoopRunning = false;
         return;
     }
 
-    // 开机即发，不做任何检测：90 秒窗口内每 2 秒循环发送一次魔术包。
-    var windowStart = Date.now();
+    var intervalMs = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
+        ? cfg.sendIntervalSec * 1000 : DEFAULT_CONFIG.sendIntervalSec * 1000;
     var sent = 0;
 
+    console.log('wol: continuous send loop STARTED (every ' +
+        (intervalMs / 1000) + 's, never stops while resident)');
+
     function sendOnce() {
-        if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
-            bootAutoState.lastWol = 'done';
-            bootLoopRunning = false;
-            console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
-            return;
-        }
         sendWOL(cfg, function (err) {
             if (err) {
                 bootAutoState.lastWol = 'error';
-                console.log('wol: boot send failed: ' + err.message);
+                console.log('wol: continuous send failed: ' + err.message);
             } else {
                 sent++;
                 bootAutoState.lastWol = 'sent';
                 recordSend(true, '');
-                console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
+                console.log('wol: magic packet ' + sent + ' sent -> ' + cfg.mac);
             }
         });
-        setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
+        setTimeout(sendOnce, intervalMs);
     }
     sendOnce();
 }
@@ -835,21 +1061,21 @@ try {
     console.log('wol: startup error: ' + e);
 }
 
-// 服务内直连订阅 tvpower/powerState：服务进程存活期间即使 AM 触发器漏掉
-// 待机唤醒的边沿，这里也能补上；同时为「短待机不触发」问题提供诊断数据。
+// 服务内直连订阅 tvpower/powerState + 屏幕状态（screenState/displayStatus）
+// + 轮询看护：服务进程存活期间即使 AM 触发器漏掉待机唤醒的边沿，这里也能补上。
+// 关键：屏幕「灭→亮」在【每次】开机（含即时开机/Quick Start+ 的短待机唤醒）都
+// 必然发生，因此常驻服务能可靠抓到短待机唤醒并触发发送——这正好修复用户实测的
+// 「遥控关机后短时间再开不触发、关 1 小时后才触发」问题。
 try {
     startPowerWatch();
 } catch (e) {
     console.log('wol: powerState watch startup error: ' + e);
 }
 
-// 方向 1：adopt 常驻 Activity 让服务进程保持存活，确保上面 powerState 直连
-// 订阅能持续监听（电视待机/唤醒时都能收到），从而待机唤醒也能抓到边沿发包。
-try {
-    startKeepAlive();
-} catch (e) {
-    console.log('wol: keepalive startup error: ' + e);
-}
+// 常驻与周期拉起：持久化周期 Activity（并入 setBootAuto 武装）会在电视开机后
+// 每 pullIntervalSec 秒主动拉起本服务，并 adopt 使其常驻；持续发送循环保证
+// 一直发魔术包。屏幕/电源看护（startPowerWatch）作为冗余补充。
+// （setBootAuto 已在 startBootAutosend 中被调用并创建该周期 Activity。）
 
 /* ------------------------------------------------------------------ *
  *  Bus methods used by the front-end app
@@ -863,15 +1089,23 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        // 手动触发或任一开机触发器回调（fromBoot）一律直接发一次魔术包，
-        // 不做电源/网络检测——优先保证唤醒成功（误唤醒问题后续再处理）。
+        // 被周期拉起 Activity 回调（fromPull）时：本服务刚被拉起来，务必启动
+        // 持续发送循环（死循环），确保之后一直发。
+        if (p.fromPull && !bootLoopRunning) {
+            console.log('wol: pulled up by periodic activity; starting continuous loop');
+            if (cfg.enabled && cfg.sendOnBoot) { runContinuousSendLoop(cfg); }
+        }
+
+        // 手动触发或任一开机触发器回调（fromBoot/fromPull）一律直接发一次魔术包，
+        // 不做电源/网络检测——优先保证唤醒成功。
         sendMagicPacket(cfg, function (sendErr) {
             if (sendErr) {
                 bootAutoState.lastWol = 'error';
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
                 bootAutoState.lastWol = 'sent';
-                console.log('wol: wake sent -> ' + cfg.mac + (p.fromBoot ? ' (fromBoot)' : ''));
+                var src = p.fromPull ? ' (fromPull)' : (p.fromBoot ? ' (fromBoot)' : '');
+                console.log('wol: wake sent -> ' + cfg.mac + src);
                 message.respond({ returnValue: true, sent: true });
             }
         });

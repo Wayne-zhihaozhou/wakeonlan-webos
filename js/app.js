@@ -22,6 +22,8 @@
         mac: document.getElementById('mac'),
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
+        sendInterval: document.getElementById('sendInterval'),
+        pullInterval: document.getElementById('pullInterval'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
         logForward: document.getElementById('logForward'),
@@ -274,6 +276,8 @@
                 els.mac.value = c.mac || '';
                 els.ip.value = c.ip || '255.255.255.255';
                 els.port.value = c.port || 9;
+                els.sendInterval.value = c.sendIntervalSec || 1;
+                els.pullInterval.value = c.pullIntervalSec || 20;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
                 els.logForward.checked = c.logForward === true;
@@ -288,6 +292,8 @@
                 els.mac.value = DEFAULT_MAC;
                 els.ip.value = '255.255.255.255';
                 els.port.value = 9;
+                els.sendInterval.value = 1;
+                els.pullInterval.value = 20;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
                 els.logForward.checked = false;
@@ -303,6 +309,8 @@
             mac: els.mac.value.trim(),
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
+            sendIntervalSec: parseInt(els.sendInterval.value, 10) || 1,
+            pullIntervalSec: parseInt(els.pullInterval.value, 10) || 20,
             enabled: els.enabled.checked,
             sendOnBoot: els.sendOnBoot.checked,
             logForward: els.logForward.checked,
@@ -318,9 +326,9 @@
 
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
-        // 多触发源（tvpower/net/display）武装结果：成功 X/3。
+        // 多触发源（tvpower/net/display/screen）+ 周期拉起(pull)：成功 X/5。
         var t = ba.triggers || {};
-        var keys = ['tvpower', 'net', 'display'];
+        var keys = ['tvpower', 'net', 'display', 'screen', 'pull'];
         var armedCount = 0;
         var detail = [];
         for (var i = 0; i < keys.length; i++) {
@@ -342,21 +350,22 @@
     function lastWolTxt(ba) {
         if (!ba || !ba.armed) { return ''; }
         var m = {
-            sent: '已发送 ✓',
+            sent: '持续发送中 ✓',
             error: '发送失败',
-            done: '90秒循环发送已完成',
-            none: '开机后尚未触发'
+            none: '尚未发送'
         };
-        return '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
+        return '；发送状态：' + (m[ba.lastWol] || ba.lastWol);
     }
 
-    // 诊断辅助：显示电视当前电源状态与「待机→开机」检测次数。
-    // 若短待机（快速启动/即时开机）期间 powerState 根本不变化，lastPowerState
-    // 会一直停在 Active，说明只能靠关闭电视的「即时开机」让每次开机都走完整启动。
+    // 诊断辅助：显示电视当前电源状态、检测到的「待机→开机」与「屏幕灭→亮」次数。
+    // 若短待机（快速启动/即时开机）期间 powerState 根本不变化，lastPowerState 会一直
+    // 停在 Active，此时应靠屏幕亮起边沿（screenOnFires）触发——这正修复了短待机不触发。
     function powerTxt(ba) {
-        if (!ba || !ba.lastPowerState) { return ''; }
-        var s = '；电视电源=' + ba.lastPowerState;
-        if (ba.resumeFires > 0) { s += '，已检测 ' + ba.resumeFires + ' 次待机唤醒'; }
+        if (!ba) { return ''; }
+        var s = '';
+        if (ba.lastPowerState) { s += '；电视电源=' + ba.lastPowerState; }
+        if (ba.resumeFires > 0) { s += '，待机唤醒 ' + ba.resumeFires + ' 次'; }
+        if (ba.screenOnFires > 0) { s += '，屏幕亮起 ' + ba.screenOnFires + ' 次'; }
         return s;
     }
 
@@ -409,7 +418,8 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.swLogForward, els.logHost, els.logPort,
+            els.swEnabled, els.swSendOnBoot, els.sendInterval, els.pullInterval,
+            els.swLogForward, els.logHost, els.logPort,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -445,10 +455,11 @@
     // readonly，下次再聚焦不会打扰。
     function isEditableInput(el) {
         return el && (el === els.mac || el === els.ip || el === els.port ||
-            el === els.logHost || el === els.logPort);
+            el === els.logHost || el === els.logPort ||
+            el === els.sendInterval || el === els.pullInterval);
     }
 
-    ['mac', 'ip', 'port', 'logHost', 'logPort'].forEach(function (key) {
+    ['mac', 'ip', 'port', 'logHost', 'logPort', 'sendInterval', 'pullInterval'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true; // 结束编辑/移开焦点后再次锁定
         });
