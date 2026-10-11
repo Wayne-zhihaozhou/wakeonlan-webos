@@ -1,7 +1,7 @@
 # 交接文档 · 电视开机自动唤醒电脑（开机自启问题）
 
 > 供接手同事排查/解决「电视开机 → 电脑自动开机」的问题。
-> 项目根：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026　|　状态：**触发链路已打通；新根因=开机发包时机早于网络就绪（已修复，待真机复测）**
+> 项目根：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026-10-11　|　状态：**根因修正：冷开机（彻底断电）无法自启是平台限制；用户实际用法=遥控器待机唤醒，改用 tvpower/powerState 触发器（待机唤醒即触发）+ 电源守卫，待真机复测**
 
 ---
 
@@ -41,6 +41,16 @@
 
 > 之前 README/HANDOVER 里"webOS 会自动拉起 JS Service"的说法是**错的**，已在文档中更正。
 
+**2026-10-11 真机结论（用户实测，推翻此前"触发链路已打通"的判断）：**
+- 用户**遥控器待机**（不拔电）→ 开机等 10 分钟，电脑端**收不到任何转发日志**；
+- 一旦**手动打开应用**，日志立刻到达。说明**开机时服务进程根本没被拉起**——
+  之前文档第 4 节"重大进展（service registered 连续出现、magic packet sent）"里的日志，
+  实际上是**手动打开应用后**才产生的，**不是**开机自动触发产生的。
+- 进一步确认：**连接管理器触发器（connectionmanager/getStatus）在"待机唤醒"场景不会 fire**——
+  待机期间 Wi-Fi 一直连着，唤醒瞬间网络状态**无变化**，Activity 触发器只在状态**变化**时触发，
+  所以永远等不到。这就是之前冷开机/待机唤醒都不生效的真正原因（不是 persist 不被恢复，
+  而是**触发事件没发生**；用户用待机而非彻底断电，persist 在这场景根本不重要）。
+
 ---
 
 ## 3. 已经做的修改（均已提交 git，且真机验证了一部分）
@@ -68,6 +78,18 @@
 - ❌ **端到端失败**：完全关电视再开机，**电脑始终没有被唤醒**。已连续两次真实测试均如此。
 
 > 关键结论：**触发器能"武装成功"（create 不报错），但电视冷开机后回调并没有真正把电脑唤醒。**
+
+**2026-10-11 改动（针对真机结论的修复，未复测）：**
+- **触发器优先级改为 `luna://com.webos.service.tvpower/powerState` 优先**（原 connectionmanager/getStatus 靠后）。
+  powerState 在「待机→开机」状态变化瞬间就 fire，最贴合用户「遥控器待机开电视」的实际用法；
+  connectionmanager 触发器在待机唤醒场景不 fire（见第 2 节），保留仅作冷开机网络就绪兜底。
+- **电源守卫 `isTvActive()`**：tvpower/powerState 触发器在「开机→待机」方向也会 fire，
+  为避免用户按遥控器让电视进待机时把刚关机的电脑又唤醒，`wake`（fromBoot 分支）和
+  `runBootSendLoop` 发送循环在发包前都会先查电视电源状态，只有 Active 才发；非 Active 记为
+  `lastWol='skip'`，窗口内中途待机则提前结束循环。查询失败 fail-open（照发）。
+- **诊断增强**：`bootAutoState` 新增 `trigger`（实际生效的触发器 URI）、`lastPowerState`；
+  UI 状态栏会显示实际触发器与电源状态，`skip` 状态也会显示。
+- 真机复测步骤见下节。
 
 ---
 
@@ -107,16 +129,21 @@
    cd C:\0_Code\wakeonlan-webos
    powershell -ExecutionPolicy Bypass -File .\deploy-wakeonlan.ps1   # 断 VPN 后执行
    ```
-2. 打开应用 → 勾选「开机自动发送」→ 保存，确认状态栏「开机自启已启用 ✓」（确保 Activity 已武装）。
-3. **完全关电视 → 重新开机**，在电脑端持续抓日志：
-   ```powershell
-   ares-log --device lg com.woltv.wakeonlan.service   # 开机后看是否有新日志
-   ```
-   开机后重点看**有没有出现以下任一标志**，判断断在哪一环：
-   - `wol: service com.woltv.wakeonlan.service registered` → 服务进程是否被拉起（若没有，说明 Activity 根本没触发回调/没拉起服务）；
-   - `wol: wake sent after network ready` → 触发器是否回调了 `wake`、是否等到了网络就绪、是否真的发了包；
-   - `wol: boot auto-send succeeded -> ...` → `startBootAutosend` 是否也发送成功；
-   - `wol: wake aborted, network not ready within 120000ms` → **网络就绪检测是否失败**（重点怀疑点，见下）。
+2. 打开应用 → 勾选「开机自动发送」→ 保存，确认状态栏「开机自启已启用 ✓」且括号里显示
+   **`tvpower/powerState`**（若显示的是 connectionmanager，说明 tvpower 触发器被固件拒绝，
+   诊断逻辑会如实显示实际生效的触发器）。
+3. **按遥控器让电视进入待机 → 等 30 秒 → 再按遥控器开机**（模拟用户真实用法），看电脑是否被唤醒：
+   - 电视从待机唤醒瞬间 → powerState Standby→Active → Activity 触发 → 服务被拉起 → 发魔术包。
+   - 开机后电脑端抓日志：
+     ```powershell
+     ares-log --device lg com.woltv.wakeonlan.service
+     ```
+     重点看标志：`boot auto-launch ARMED via luna://com.webos.service.tvpower/powerState`、
+     `boot wake sent -> ... (powerState=Active)`。若看到 `boot trigger fired but TV powerState=...
+     (not Active); skip wake` 或 `boot send skipped`，说明触发器在待机方向 fire 被守卫正确拦下。
+   - **反向验证**：电视开机状态按遥控器进待机，电脑**不应**被唤醒（守卫生效）。
+   - **UI 状态栏**（打开应用可见）：`上次开机唤醒：已发送 ✓（电源状态=Active）`；若显示
+     `电视非开机状态，跳过唤醒` 说明守卫拦下了待机方向触发。
 
    **不用日志也能看（UI 状态栏）**：服务已把「最近一次开机唤醒结果」写进 `bootAuto.lastWol`，
    打开应用后状态栏会显示：

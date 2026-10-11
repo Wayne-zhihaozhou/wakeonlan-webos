@@ -2,11 +2,9 @@
  * Wake on LAN service for webOS TV
  * ---------------------------------
  * Runs as a Node.js JS Service in the background on the TV.
- * - On service start (which happens when the TV boots / the service is
- *   launched) it checks the stored config. If "sendOnBoot" is enabled it
- *   waits until the network is up (instead of a fixed delay) and sends a
- *   Wake-on-LAN magic packet (UDP) as soon as a real IPv4 address is ready,
- *   so the PC boots automatically without a manual timeout.
+ * - 开机自动唤醒（简单粗暴版）：电视开机后（服务被 Activity Manager 拉起），
+ *   在 90 秒窗口内每 2 秒循环发送一次 Wake-on-LAN 魔术包（UDP）。
+ *   不做网络就绪检测、不做电源状态检测——开机即发、一直循环，确保电脑收到。
  * - Registers bus methods used by the front-end app:
  *     wake       -> send a magic packet now
  *     getConfig  -> return stored config
@@ -81,22 +79,18 @@ var lastSend = { at: 0, ok: false, error: '' };
  *  alone means the PC never wakes until the user opens the app.
  *
  *  Fix: register a *persistent* Activity (`luna://com.palm.activitymanager`)
- *  that fires when the TV's network comes up after boot and whose callback
- *  invokes our `wake` method. A persistent Activity lives in DB8 and is
+ *  with a single simple trigger. A persistent Activity lives in DB8 and is
  *  re-armed by the Activity Manager on every boot, so the service is pulled
- *  up automatically as soon as the TV is online — no app launch needed.
+ *  up automatically right after the TV powers on — no app launch needed.
  * ------------------------------------------------------------------ */
 var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
-// lastWol: 最近一次唤醒路径的结果，用于在 UI 上直接诊断「开机触发链路」——
-// none=服务启动后还未触发过唤醒；sent=已发出魔术包；timeout=等网络就绪超时；error=发送失败。
-var bootAutoState = { armed: false, error: '', diag: '', lastWol: 'none' };
-// 不同 webOS 版本的连接管理服务名不同：新版用 com.webos.service.connectionmanager，
-// 旧版用 com.palm.connectionmanager。按顺序逐个尝试，直到 Activity 被成功受理。
-var BOOT_TRIGGER_METHODS = [
-    'luna://com.webos.service.connectionmanager/getStatus',
-    'luna://com.palm.connectionmanager/getStatus'
-];
+// lastWol: 最近一次开机唤醒的结果，用于在 UI 状态栏显示——
+// none=服务启动后还未发过包；sent=已发出魔术包；error=发送失败；done=90 秒窗口已结束。
+var bootAutoState = { armed: false, error: '', lastWol: 'none' };
+// 单个简单触发器：tvpower/powerState 电源状态变化即 fire（电视开机瞬间触发，
+// 最贴合「遥控器待机开电视」的实际用法）。不做任何网络/电源检测。
+var BOOT_TRIGGER_METHOD = 'luna://com.webos.service.tvpower/powerState';
 
 /* ------------------------------------------------------------------ *
  *  Config store
@@ -270,10 +264,10 @@ function saveConfig(cfg, cb) {
  *  Boot auto-launch management (Activity Manager)
  *  ------------------------------------------------------------------ *
  *  Arming creates (or replaces) a persistent, background Activity whose
- *  trigger fires when the TV's network comes up and whose callback invokes
- *  our `wake` method. Because the Activity is persistent, the Activity
+ *  trigger fires when the TV powers on and whose callback invokes our
+ *  `wake` method. Because the Activity is persistent, the Activity
  *  Manager re-arms it on every TV boot, so our service gets pulled up and
- *  sends the magic packet as soon as the TV is online — no app launch.
+ *  starts the 90-second boot send loop — no app launch needed.
  * ------------------------------------------------------------------ */
 function setBootAuto(enabled, cb) {
     var done = cb || function () {};
@@ -282,90 +276,35 @@ function setBootAuto(enabled, cb) {
             // A "not found" is fine here (already disabled).
             bootAutoState.armed = false;
             bootAutoState.error = '';
-            bootAutoState.diag = '';
             console.log('wol: boot auto-launch disabled');
             done(null);
         }, 6000);
         return;
     }
 
-    // 尝试用不同版本的连接管理器地址逐个创建 Activity，直到成功或全部失败。
-    var tried = 0;
-    var lastRes = {};
-
-    function tryTrigger(index) {
-        if (index >= BOOT_TRIGGER_METHODS.length) {
-            // 全部持久化地址都失败 -> 追加一次「非持久化」诊断，用于区分
-            // 「url 无效」到底是触发器地址问题，还是 persist 权限被固件拒绝。
-            runDiag();
-            return;
-        }
-        var triggerUri = BOOT_TRIGGER_METHODS[index];
-        createActivity(triggerUri, true, function (res) {
-            tried++;
-            lastRes = res || {};
-            console.log('wol: activity create [' + tried + '] trigger=' + triggerUri +
-                ' -> ' + JSON.stringify(lastRes));
-            if (lastRes.returnValue) {
-                bootAutoState.armed = true;
-                bootAutoState.error = '';
-                console.log('wol: boot auto-launch ARMED via ' + triggerUri);
-                done(null);
-                return;
-            }
-            // 记录当前失败（保留最近一次错误），继续尝试下一个触发器地址。
-            bootAutoState.armed = false;
-            bootAutoState.error = (lastRes.errorText || lastRes.error) || 'activity create failed';
-            console.log('wol: boot auto-launch attempt [' + tried + '] FAILED (' +
-                bootAutoState.error + ')');
-            tryTrigger(index + 1);
-        });
-    }
-
-    function createActivity(triggerUri, persist, cb) {
-        var type = persist ? { background: true, persist: true } : { background: true };
-        lunaCall(AM_URI, 'create', {
-            activity: {
-                name: BOOT_ACTIVITY_NAME,
-                description: 'Wake-on-LAN: send magic packet when TV boots and network is up',
-                type: type,
-                trigger: { method: triggerUri, params: { subscribe: true } },
-                callback: { method: 'luna://com.woltv.wakeonlan.service/wake' }
-            },
-            replace: true,   // idempotent: safe to call again
-            start: true,     // eligible to run as soon as the trigger fires
-            subscribe: true  // keep it alive / adoptable
-        }, cb, 6000);
-    }
-
-    function runDiag() {
-        // 用第一个触发器地址、去掉 persist，看是否就能创建成功。
-        var triggerUri = BOOT_TRIGGER_METHODS[0];
-        createActivity(triggerUri, false, function (res) {
-            var ok = !!(res && res.returnValue);
-            if (ok) {
-                // 非持久能建、持久不能建 -> 是 persist 权限问题，不是 URL 问题。
-                bootAutoState.diag = '非持久 Activity 可正常创建 → 疑为固件禁止第三方持久化触发器（url 报错为误判）';
-            } else {
-                bootAutoState.diag = '去掉 persist 仍失败（' +
-                    ((res && (res.errorText || res.error)) || '同错') +
-                    '）→ trigger/callback 地址本身被拒';
-            }
-            console.log('wol: diag (non-persist) trigger=' + triggerUri +
-                ' -> ' + JSON.stringify(res || {}) + ' ; ' + bootAutoState.diag);
-            // 诊断用的非持久 Activity 只用于探测，成功则立刻取消，不残留。
-            if (ok) {
-                lunaCall(AM_URI, 'cancel', { name: BOOT_ACTIVITY_NAME }, function () {}, 6000);
-            }
-            done(new Error(bootAutoState.error || 'activity create failed'));
-        });
-    }
-
-    tryTrigger(0);
+    // 单个简单触发器，不做多候选尝试、不做诊断探测。
+    lunaCall(AM_URI, 'create', {
+        activity: {
+            name: BOOT_ACTIVITY_NAME,
+            description: 'Wake-on-LAN: send magic packets for 90s when the TV boots',
+            type: { background: true, persist: true },
+            trigger: { method: BOOT_TRIGGER_METHOD, params: { subscribe: true } },
+            callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromBoot: true } }
+        },
+        replace: true,   // idempotent: safe to call again
+        start: true,     // eligible to run as soon as the trigger fires
+        subscribe: true  // keep it alive / adoptable
+    }, function (res) {
+        var ok = !!(res && res.returnValue);
+        bootAutoState.armed = ok;
+        bootAutoState.error = ok ? '' : ((res && (res.errorText || res.error)) || 'activity create failed');
+        console.log('wol: boot auto-launch ' + (ok ? 'ARMED' : 'FAILED (' + bootAutoState.error + ')'));
+        done(ok ? null : new Error(bootAutoState.error));
+    }, 6000);
 }
 
 /* ------------------------------------------------------------------ *
- *  Network helpers (ready-check + LAN scan)
+ *  Network helpers (LAN scan only)
  * ------------------------------------------------------------------ */
 function getLocalIpv4() {
     // Returns the first real (non-internal, non-link-local) IPv4 address.
@@ -388,51 +327,6 @@ function getLocalIpv4() {
         }
     } catch (e) { /* noop */ }
     return null;
-}
-
-/* ------------------------------------------------------------------ *
- *  Real network readiness check
- *  ------------------------------------------------------------------ *
- *  A TV has an IPv4 address as soon as the Wi-Fi interface comes up,
- *  but that is NOT the same as being online: right after boot the Wi-Fi
- *  still needs a few seconds to finish associating and to receive a
- *  gateway/default-route from DHCP. If we fire the magic packet during
- *  that window it has no usable route to the LAN and the PC never wakes.
- *
- *  So "ready" here means: we have a real IPv4 address AND the kernel has
- *  installed a default route (0.0.0.0) — the reliable sign that the Wi-Fi
- *  has actually finished connecting. On webOS we read /proc/net/route the
- *  same way we already read /proc/net/arp.
- * ------------------------------------------------------------------ */
-function readDefaultRouteInfo() {
-    // Returns { available: bool, hasDefault: bool }.
-    var info = { available: false, hasDefault: false };
-    try {
-        var text = fs.readFileSync('/proc/net/route', 'utf8');
-        info.available = true;
-        var lines = String(text).split('\n');
-        // Columns: Iface | Destination | Gateway | Flags | RefCnt | Use | Metric | Mask ...
-        // Destination "00000000" == default route (0.0.0.0).
-        for (var i = 1; i < lines.length; i++) {
-            var f = lines[i].trim().split(/\s+/);
-            if (f.length >= 2 && f[1] === '00000000') {
-                info.hasDefault = true;
-                break;
-            }
-        }
-    } catch (e) { /* /proc may be unavailable in some sandboxes -> fall back to IP-only */ }
-    return info;
-}
-
-function networkReady() {
-    // An IP alone is not enough (Wi-Fi may still be associating). Prefer to
-    // require a default route too, but if /proc/net/route cannot be read at
-    // all, fall back to the old IP-only check so we never get stuck.
-    var ip = getLocalIpv4();
-    if (!ip) { return false; }
-    var rt = readDefaultRouteInfo();
-    if (!rt.available) { return true; }  // route file unreadable -> trust the IP
-    return rt.hasDefault;                // otherwise wait for the route to appear
 }
 
 function parseArpTableText(text) {
@@ -639,16 +533,12 @@ function sendMagicPacket(cfg, cb) {
 /* ------------------------------------------------------------------ *
  *  Service entry point: auto-send at boot
  * ------------------------------------------------------------------ *
- *  关键修复（2026-10-10）：此前「开机即发、不做网络就绪判断」导致电视冷开机
- *  后 Wi-Fi 还没连上就发广播包，包根本出不去，电脑永远不醒（手动测试因为电视
- *  已在线所以正常）。现在改为：先等网络真正就绪（有 IPv4 + 有默认路由），再在
- *  发送窗口内每 2 秒持续重发。同时用进程级防抖避免 Activity 反复拉起服务、
- *  每次都从头重发、浪费窗口。
+ *  开机后不做任何检测（网络就绪 / 电源状态都不管），直接进入 90 秒发送窗口，
+ *  每 2 秒循环发送一次魔术包，确保电脑一定能收到。用进程级防抖避免 Activity
+ *  反复拉起服务、每次都从头重发、浪费窗口。
  * ------------------------------------------------------------------ */
 var BOOT_SEND_WINDOW_MS = 90000;      // 开机后 90 秒的发送窗口
 var BOOT_SEND_INTERVAL_MS = 2000;     // 窗口期内每 2 秒重发一次魔术包
-var BOOT_NET_WAIT_TIMEOUT_MS = 30000; // 等网络就绪的最长时间（30s）
-var BOOT_NET_POLL_MS = 1000;          // 轮询网络就绪的间隔
 var bootLoopRunning = false;          // 进程级防抖：同进程只跑一轮开机发送
 
 function startBootAutosend() {
@@ -692,56 +582,85 @@ function runBootSendLoop(cfg) {
         return;
     }
 
-    var waitStart = Date.now();
-
-    // 关键修复：电视冷开机后 Wi-Fi 还没连上，此时立刻发广播包根本出不去
-    // （这就是「手动测试能唤醒、开机自动却不醒」的根因）。先等网络真正
-    // 就绪（有真实 IPv4 且有默认路由）再进入发送窗口；最多等 30s，超时
-    // 也照发，避免永久卡住。
-    function waitReady() {
-        if (networkReady()) {
-            console.log('wol: network ready after ' + (Date.now() - waitStart) + 'ms; starting boot send');
-            startWindow();
+    // 电源守卫：tvpower/powerState 触发器在「待机->开机」和「开机->待机」两个
+    // 方向都会 fire 并拉起服务。若电视当前不是开机（Active）状态（例如用户刚
+    // 按遥控器让电视进待机、触发器顺势拉起了本服务），绝不能进入发送窗口，
+    // 否则会把刚关机的电脑又唤醒。查询失败按 Active 处理（fail-open）。
+    isTvActive(function (active, state) {
+        bootAutoState.lastPowerState = state;
+        if (!active) {
+            bootAutoState.lastWol = 'skip';
+            bootLoopRunning = false;
+            console.log('wol: TV powerState=' + state + ' (not Active); boot send skipped');
             return;
         }
-        if (Date.now() - waitStart >= BOOT_NET_WAIT_TIMEOUT_MS) {
-            bootAutoState.lastWol = 'error';
-            console.log('wol: network not ready within ' + BOOT_NET_WAIT_TIMEOUT_MS +
-                'ms; sending anyway');
-            startWindow();
-            return;
-        }
-        setTimeout(waitReady, BOOT_NET_POLL_MS);
-    }
+        startBootSendWindow(cfg);
+    });
 
-    function startWindow() {
-        var windowStart = Date.now();
-        var sent = 0;
+    function startBootSendWindow(cfg) {
+        var waitStart = Date.now();
 
-        function sendOnce() {
-            if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
-                bootAutoState.lastWol = 'done';
-                bootLoopRunning = false;
-                console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
+        // 关键修复：电视冷开机后 Wi-Fi 还没连上，此时立刻发广播包根本出不去
+        // （这就是「手动测试能唤醒、开机自动却不醒」的根因）。先等网络真正
+        // 就绪（有真实 IPv4 且有默认路由）再进入发送窗口；最多等 30s，超时
+        // 也照发，避免永久卡住。
+        function waitReady() {
+            if (networkReady()) {
+                console.log('wol: network ready after ' + (Date.now() - waitStart) + 'ms; starting boot send');
+                startWindow();
                 return;
             }
-            sendWOL(cfg, function (err) {
-                if (err) {
-                    bootAutoState.lastWol = 'error';
-                    console.log('wol: boot send failed: ' + err.message);
-                } else {
-                    sent++;
-                    bootAutoState.lastWol = 'sent';
-                    recordSend(true, '');
-                    console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
-                }
-            });
-            setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
+            if (Date.now() - waitStart >= BOOT_NET_WAIT_TIMEOUT_MS) {
+                bootAutoState.lastWol = 'error';
+                console.log('wol: network not ready within ' + BOOT_NET_WAIT_TIMEOUT_MS +
+                    'ms; sending anyway');
+                startWindow();
+                return;
+            }
+            setTimeout(waitReady, BOOT_NET_POLL_MS);
         }
-        sendOnce();
-    }
 
-    waitReady();
+        function startWindow() {
+            var windowStart = Date.now();
+            var sent = 0;
+
+            function sendOnce() {
+                if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
+                    bootAutoState.lastWol = 'done';
+                    bootLoopRunning = false;
+                    console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
+                    return;
+                }
+                // 窗口期内每次发包前再确认电视仍在开机状态；用户中途让电视进
+                // 待机则提前结束窗口，避免持续把已关机的电脑唤醒。
+                isTvActive(function (active, state) {
+                    if (!active) {
+                        bootAutoState.lastWol = 'skip';
+                        bootAutoState.lastPowerState = state;
+                        bootLoopRunning = false;
+                        console.log('wol: TV powerState=' + state +
+                            '; stop boot send loop early (' + sent + ' packets sent)');
+                        return;
+                    }
+                    sendWOL(cfg, function (err) {
+                        if (err) {
+                            bootAutoState.lastWol = 'error';
+                            console.log('wol: boot send failed: ' + err.message);
+                        } else {
+                            sent++;
+                            bootAutoState.lastWol = 'sent';
+                            recordSend(true, '');
+                            console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
+                        }
+                    });
+                    setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
+                });
+            }
+            sendOnce();
+        }
+
+        waitReady();
+    }
 }
 
 try {
@@ -762,8 +681,35 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        // 直接发送一次魔术包，不做网络就绪等复杂判断。开机唤醒的持续循环
-        // 发送由 startBootAutosend 在 90 秒窗口内负责，这里仅处理手动触发。
+        if (p.fromBoot) {
+            // 来自 Activity 触发器（开机/待机唤醒路径）：tvpower/powerState 在
+            // 「待机->开机」和「开机->待机」两个方向都会 fire，必须先确认电视
+            // 当前确实处于开机（Active）状态才发包，否则用户按遥控器让电视进
+            // 待机时会把刚关机的电脑又唤醒。查询失败按 Active 处理（fail-open）。
+            isTvActive(function (active, state) {
+                bootAutoState.lastPowerState = state;
+                if (!active) {
+                    bootAutoState.lastWol = 'skip';
+                    console.log('wol: boot trigger fired but TV powerState=' + state +
+                        ' (not Active); skip wake');
+                    message.respond({ returnValue: true, sent: false, skipped: true, powerState: state });
+                    return;
+                }
+                sendMagicPacket(cfg, function (sendErr) {
+                    if (sendErr) {
+                        bootAutoState.lastWol = 'error';
+                        message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
+                    } else {
+                        bootAutoState.lastWol = 'sent';
+                        console.log('wol: boot wake sent -> ' + cfg.mac + ' (powerState=' + state + ')');
+                        message.respond({ returnValue: true, sent: true, powerState: state });
+                    }
+                });
+            });
+            return;
+        }
+
+        // 手动触发（应用内按钮）：直接发送一次魔术包，不做网络就绪等复杂判断。
         sendMagicPacket(cfg, function (sendErr) {
             if (sendErr) {
                 bootAutoState.lastWol = 'error';

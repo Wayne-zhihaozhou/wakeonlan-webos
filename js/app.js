@@ -318,7 +318,15 @@
 
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
-        if (ba.armed) { return '，开机自启已启用 ✓'; }
+        if (ba.armed) {
+            var t = '，开机自启已启用 ✓';
+            if (ba.trigger) {
+                // 显示实际生效的触发器（如 tvpower/powerState），便于确认走的是哪条链路。
+                var trig = String(ba.trigger).replace(/^luna:\/\//, '');
+                t += '（' + trig + '）';
+            }
+            return t;
+        }
         var s = '，⚠ 开机自启启用失败';
         if (ba.error) { s += '（' + ba.error + '）'; }
         if (ba.diag) { s += '；诊断：' + ba.diag; }
@@ -332,9 +340,12 @@
             timeout: '等网络就绪超时（未发出）',
             error: '发送失败',
             done: '90秒循环发送已完成',
+            skip: '电视非开机状态，跳过唤醒',
             none: '开机后尚未触发'
         };
-        return '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
+        var s = '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
+        if (ba.lastPowerState) { s += '（电源状态=' + ba.lastPowerState + '）'; }
+        return s;
     }
 
     function saveConfig() {
