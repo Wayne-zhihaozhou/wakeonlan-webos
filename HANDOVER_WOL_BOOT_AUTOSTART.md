@@ -1,7 +1,7 @@
 # 交接文档 · 电视开机自动唤醒电脑（开机自启问题）
 
 > 供接手同事排查/解决「电视开机 → 电脑自动开机」的问题。
-> 项目根：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026-10-11　|　状态：**长待机/彻底断电后开机已正常触发（powerState 触发器生效）；新卡点=遥控器关电视后短时间内再开机不触发。已定位方向：电视「即时开机/快速启动」导致短待机时 powerState 无变化、基于「变化」的触发器不 fire。已加服务内 powerState 直连订阅兜底 + UI/日志诊断；最可靠修复=电视端关闭「即时开机」，待真机复测**
+> 项目根：`C:\0_Code\wakeonlan-webos`　|　文档更新：2026　|　状态：**长待机/彻底断电后开机已正常触发（powerState 触发器生效）；新卡点=遥控器关电视后短时间内再开机不触发。已加「多触发源（多条件触发）」方案：同时注册 tvpower/powerState、connectionmanager/getStatus、systemservice/displayStatus 三个持久化 Activity，任一触发即可唤醒，提高「屏幕亮起」时的触发稳定性。待真机复测**
 
 ---
 
@@ -292,3 +292,47 @@ ares-log     --device lg com.woltv.wakeonlan.service
 
 排障时可把电视日志实时推到电脑上看（电视应用勾选「把日志转发到电脑」+ 电脑运行 `receive-log.ps1`），
 或在本机用 `capture-boot-log.ps1` 抓电视冷开机后的日志，定位更省事。
+
+---
+
+## 11. 多触发源（多条件触发）方案 —— 提高「屏幕亮起」触发稳定性
+
+> **背景**：用户反馈 `tvpower/powerState` 单触发器不稳定，要求「添加多种触发条件，稳定在电视屏幕亮起时触发」。
+> **当前优先级**：**先保证唤醒成功，误唤醒问题后续再处理** —— 因此当前版本**不带电源守卫**，
+> 任一触发源 fire 就无条件发魔术包（最大化唤醒成功率）。
+
+### 方案要点（已实现，待真机复测）
+
+webOS Activity Manager 的单个 Activity 只支持一个 trigger，因此「多条件触发」的实现方式是
+**为每个触发源注册一个独立的持久化 Activity，全部回调到同一个 `wake` 方法**——任一触发即可唤醒，
+多源互为冗余，显著降低「单一触发源在特定固件/场景不触发导致电脑不醒」的风险。
+
+`services/com.woltv.wakeonlan.service/wol_service.js` 中新增触发源列表 `BOOT_TRIGGERS`：
+
+| key | 触发源方法 | 覆盖场景 |
+| --- | --- | --- |
+| `tvpower` | `luna://com.webos.service.tvpower/powerState` | 电源状态变化（待机→开机），最贴合遥控器待机开电视 |
+| `net` | `luna://com.webos.service.connectionmanager/getStatus` | 冷开机网络从无到有，彻底断电再开机的兜底 |
+| `display` | `luna://com.webos.service.systemservice/displayStatus` | 屏幕显示状态变化，直接反映「屏幕亮起」 |
+
+`setBootAuto(enabled, cb)` 改动：
+- `enabled`：遍历 `BOOT_TRIGGERS`，为每个源 `create` 一个持久化 Activity（`name` 唯一、`replace:true`、
+  `type:{background,persist}`、`callback: wake` 带 `source` 标识）。全部完成后回填 `bootAutoState`：
+  `armed`（至少一个成功）+ `triggers.{key}.armed/error`（逐个结果）。
+- 关闭：取消所有触发源的 Activity。
+
+日志标志：`wol: trigger[<key>] ARMED/FAILED via <method>`、`wol: boot auto-launch ARMED (x/3 triggers)`。
+UI 状态栏显示「开机自启已启用 ✓（触发源 X/3：tvpower/net/…）」，可直接看到哪些源武装成功。
+
+### 注意事项（接手者必读）
+
+1. **`displayStatus` / `connectionmanager/getStatus` 是否对第三方 Activity 可订阅取决于固件 ACG 权限**。
+   真机部署后重点看 `ares-log`：三个 `trigger[xxx] ARMED` 是否都有；个别 `FAILED` 不影响其它成功的源，
+   但只要**至少一个** ARMED，就能在对应场景唤醒。
+2. **当前无电源守卫**（`isTvActive` 已按用户要求移除）。`tvpower/powerState` 在电视「进待机」方向也会
+   fire，因此可能发生「按遥控器让电视待机时电脑被唤醒」的误触。这是用户接受的当前取舍——
+   **先确保唤醒成功**。将来若要加守卫，可参考第 3 节历史里描述过的 `isTvActive()` 思路。
+3. 服务内 `startPowerWatch`（直连订阅 powerState）仍保留，作为服务进程存活期间的兜底 + 诊断
+   （`lastPowerState` / `resumeFires`），不影响多触发源 Activity。
+4. **真机复测步骤**：重新部署 → 打开应用保存一次（确认状态栏「触发源 X/3」）→ 分别测
+   「遥控器待机→开机」「彻底断电→开机」，看电脑是否被唤醒，以及 `ares-log` 里哪个 `trigger[xxx]` 触发。

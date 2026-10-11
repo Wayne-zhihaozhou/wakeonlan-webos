@@ -2,9 +2,10 @@
  * Wake on LAN service for webOS TV
  * ---------------------------------
  * Runs as a Node.js JS Service in the background on the TV.
- * - 开机自动唤醒（简单粗暴版）：电视开机后（服务被 Activity Manager 拉起），
- *   在 90 秒窗口内每 2 秒循环发送一次 Wake-on-LAN 魔术包（UDP）。
- *   不做网络就绪检测、不做电源状态检测——开机即发、一直循环，确保电脑收到。
+ * - 开机自动唤醒：电视开机后（服务被 Activity Manager 的多条件触发器拉起），
+ *   在 90 秒窗口内每 2 秒循环发送一次 Wake-on-LAN 魔术包（UDP），确保电脑收到。
+ *   多触发源（tvpower/powerState、connectionmanager/getStatus、displayStatus）
+ *   任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性。
  * - Registers bus methods used by the front-end app:
  *     wake       -> send a magic packet now
  *     getConfig  -> return stored config
@@ -78,19 +79,58 @@ var lastSend = { at: 0, ok: false, error: '' };
  *  Nothing pulls it up at TV boot, so relying on `startBootAutosend()`
  *  alone means the PC never wakes until the user opens the app.
  *
- *  Fix: register a *persistent* Activity (`luna://com.palm.activitymanager`)
- *  with a single simple trigger. A persistent Activity lives in DB8 and is
- *  re-armed by the Activity Manager on every boot, so the service is pulled
- *  up automatically right after the TV powers on — no app launch needed.
+ *  Fix: register *persistent* Activities (`luna://com.palm.activitymanager`),
+ *  one per trigger source, each with a simple trigger. Persistent Activities
+ *  live in DB8 and are re-armed by the Activity Manager on every boot, so the
+ *  service is pulled up automatically right after the TV powers on — no app
+ *  launch needed. Using several trigger sources gives redundancy so that any
+ *  single source a given firmware refuses (or a boot scenario that doesn't
+ *  fire it) can't block the whole wake flow.
  * ------------------------------------------------------------------ */
 var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
 // lastWol: 最近一次开机唤醒的结果，用于在 UI 状态栏显示——
 // none=服务启动后还未发过包；sent=已发出魔术包；error=发送失败；done=90 秒窗口已结束。
-var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: '', resumeFires: 0 };
-// 单个简单触发器：tvpower/powerState 电源状态变化即 fire（电视开机瞬间触发，
-// 最贴合「遥控器待机开电视」的实际用法）。不做任何网络/电源检测。
-var BOOT_TRIGGER_METHOD = 'luna://com.webos.service.tvpower/powerState';
+// armed: 至少一个开机触发器 Activity 成功武装；triggers: 各触发源武装结果。
+var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: '', resumeFires: 0, triggers: {} };
+
+/*
+ * 开机触发源列表（多条件、任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性）。
+ * 每个触发源注册为一个独立的持久化 Activity，全部回调到同一个 `wake` 方法：
+ *   - tvpower  : com.webos.service.tvpower/powerState  电源状态变化（待机→开机瞬间 fire），
+ *                最贴合「遥控器待机开电视」的实际用法。
+ *   - net      : com.webos.service.connectionmanager/getStatus  冷开机时网络从无到有的变化，
+ *                作为「彻底断电/完全关机再开机」的兜底（此时网络是就绪的最可靠信号）。
+ *   - display  : com.webos.service.systemservice/displayStatus  屏幕显示状态变化，
+ *                直接反映「屏幕亮起」这个时刻。
+ * 任一 Activity 触发都会拉起服务并调用 wake，多个触发源互为冗余——只要有一个可用就能唤醒，
+ * 显著降低「单一触发器在特定固件/场景下不触发」导致电脑不醒的风险。
+ * 注意：displayStatus / connectionmanager 等是否对第三方 Activity 可订阅取决于固件 ACG 权限，
+ * 需真机验证；个别源武装失败会记录到 bootAutoState.triggers，不影响其它成功者。
+ */
+var BOOT_TRIGGERS = [
+    {
+        key: 'tvpower',
+        name: BOOT_ACTIVITY_NAME + '.tvpower',
+        method: 'luna://com.webos.service.tvpower/powerState',
+        params: { subscribe: true },
+        desc: 'TV power state change (standby->on)'
+    },
+    {
+        key: 'net',
+        name: BOOT_ACTIVITY_NAME + '.net',
+        method: 'luna://com.webos.service.connectionmanager/getStatus',
+        params: { subscribe: true },
+        desc: 'Network ready after cold boot'
+    },
+    {
+        key: 'display',
+        name: BOOT_ACTIVITY_NAME + '.display',
+        method: 'luna://com.webos.service.systemservice/displayStatus',
+        params: { subscribe: true },
+        desc: 'Screen display status change (screen on)'
+    }
+];
 
 /* ------------------------------------------------------------------ *
  *  Direct powerState watch（待机唤醒兜底 + 诊断）
@@ -346,44 +386,89 @@ function saveConfig(cfg, cb) {
 /* ------------------------------------------------------------------ *
  *  Boot auto-launch management (Activity Manager)
  *  ------------------------------------------------------------------ *
- *  Arming creates (or replaces) a persistent, background Activity whose
- *  trigger fires when the TV powers on and whose callback invokes our
- *  `wake` method. Because the Activity is persistent, the Activity
- *  Manager re-arms it on every TV boot, so our service gets pulled up and
- *  starts the 90-second boot send loop — no app launch needed.
+ *  Arming creates (or replaces) one persistent, background Activity per
+ *  trigger source in BOOT_TRIGGERS. Each Activity's trigger fires when the
+ *  TV powers on / screen comes up and its callback invokes our `wake`
+ *  method. Because the Activities are persistent, the Activity Manager
+ *  re-arms them on every TV boot, so our service gets pulled up and starts
+ *  the 90-second boot send loop — no app launch needed.
+ *
+ *  Multiple trigger sources give redundancy: any one that fires wakes the
+ *  PC, so a single source that a given firmware refuses (or that doesn't
+ *  fire in a particular boot scenario) can no longer block the whole flow.
  * ------------------------------------------------------------------ */
 function setBootAuto(enabled, cb) {
     var done = cb || function () {};
     if (!enabled) {
-        lunaCall(AM_URI, 'cancel', { name: BOOT_ACTIVITY_NAME }, function (res) {
-            // A "not found" is fine here (already disabled).
+        // 取消所有触发源对应的 Activity。
+        var pendingCancels = BOOT_TRIGGERS.length;
+        function finishCancel() {
             bootAutoState.armed = false;
             bootAutoState.error = '';
             console.log('wol: boot auto-launch disabled');
             done(null);
-        }, 6000);
+        }
+        if (pendingCancels === 0) { finishCancel(); return; }
+        BOOT_TRIGGERS.forEach(function (trg) {
+            lunaCall(AM_URI, 'cancel', { name: trg.name }, function () {
+                // A "not found" is fine here (already disabled).
+                bootAutoState.triggers[trg.key] = { armed: false };
+                if (--pendingCancels <= 0) { finishCancel(); }
+            }, 6000);
+        });
         return;
     }
 
-    // 单个简单触发器，不做多候选尝试、不做诊断探测。
-    lunaCall(AM_URI, 'create', {
-        activity: {
-            name: BOOT_ACTIVITY_NAME,
-            description: 'Wake-on-LAN: send magic packets for 90s when the TV boots',
-            type: { background: true, persist: true },
-            trigger: { method: BOOT_TRIGGER_METHOD, params: { subscribe: true } },
-            callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromBoot: true } }
-        },
-        replace: true,   // idempotent: safe to call again
-        start: true,     // eligible to run as soon as the trigger fires
-        subscribe: true  // keep it alive / adoptable
-    }, function (res) {
-        var ok = !!(res && res.returnValue);
-        bootAutoState.armed = ok;
-        bootAutoState.error = ok ? '' : ((res && (res.errorText || res.error)) || 'activity create failed');
-        console.log('wol: boot auto-launch ' + (ok ? 'ARMED' : 'FAILED (' + bootAutoState.error + ')'));
-        done(ok ? null : new Error(bootAutoState.error));
-    }, 6000);
+    // 为每个触发源逐个武装；记录每个的结果，全部完成后回填总状态。
+    var remaining = BOOT_TRIGGERS.length;
+    var anyArmed = false;
+    var lastError = '';
+
+    function maybeFinish() {
+        if (remaining > 0) { return; }
+        bootAutoState.armed = anyArmed;
+        bootAutoState.error = anyArmed ? '' : (lastError || 'all triggers failed');
+        console.log('wol: boot auto-launch ' +
+            (anyArmed ? 'ARMED (' + (BOOT_TRIGGERS.length - countFailed()) + '/' + BOOT_TRIGGERS.length + ' triggers)' :
+                        'FAILED (all triggers: ' + bootAutoState.error + ')'));
+        done(anyArmed ? null : new Error(bootAutoState.error));
+    }
+
+    function countFailed() {
+        var n = 0;
+        for (var i = 0; i < BOOT_TRIGGERS.length; i++) {
+            var t = bootAutoState.triggers[BOOT_TRIGGERS[i].key];
+            if (t && !t.armed) { n++; }
+        }
+        return n;
+    }
+
+    BOOT_TRIGGERS.forEach(function (trg) {
+        lunaCall(AM_URI, 'create', {
+            activity: {
+                name: trg.name,
+                description: 'Wake-on-LAN trigger (' + trg.desc + ')',
+                type: { background: true, persist: true },
+                trigger: { method: trg.method, params: trg.params },
+                callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromBoot: true, source: trg.key } }
+            },
+            replace: true,   // idempotent: safe to call again
+            start: true,     // eligible to run as soon as the trigger fires
+            subscribe: true  // keep it alive / adoptable
+        }, function (res) {
+            var ok = !!(res && res.returnValue);
+            bootAutoState.triggers[trg.key] = {
+                armed: ok,
+                error: ok ? '' : ((res && (res.errorText || res.error)) || 'activity create failed')
+            };
+            if (ok) { anyArmed = true; } else { lastError = bootAutoState.triggers[trg.key].error; }
+            console.log('wol: trigger[' + trg.key + '] ' +
+                (ok ? 'ARMED' : 'FAILED (' + bootAutoState.triggers[trg.key].error + ')') +
+                ' via ' + trg.method);
+            remaining--;
+            maybeFinish();
+        }, 6000);
+    });
 }
 
 /* ------------------------------------------------------------------ *
@@ -643,9 +728,9 @@ function startBootAutosend() {
                 console.log('wol: boot loop already running in this process; skip re-arm');
                 return;
             }
-            // Re-arm the persistent boot Activity to match the stored config.
-            // (replace:true makes this idempotent, and it self-heals if the
-            // Activity was ever lost.)
+            // Re-arm the persistent boot Activities (one per trigger source) to
+            // match the stored config. (replace:true makes this idempotent, and
+            // it self-heals if an Activity was ever lost.)
             setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
             runBootSendLoop(sendCfg);
         }, 4000);
@@ -718,8 +803,8 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        // 手动触发或开机触发器回调（fromBoot）一律直接发一次魔术包，
-        // 不做电源/网络检测。
+        // 手动触发或任一开机触发器回调（fromBoot）一律直接发一次魔术包，
+        // 不做电源/网络检测——优先保证唤醒成功（误唤醒问题后续再处理）。
         sendMagicPacket(cfg, function (sendErr) {
             if (sendErr) {
                 bootAutoState.lastWol = 'error';

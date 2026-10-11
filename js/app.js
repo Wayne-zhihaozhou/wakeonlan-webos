@@ -318,8 +318,21 @@
 
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
+        // 多触发源（tvpower/net/display）武装结果：成功 X/3。
+        var t = ba.triggers || {};
+        var keys = ['tvpower', 'net', 'display'];
+        var armedCount = 0;
+        var detail = [];
+        for (var i = 0; i < keys.length; i++) {
+            var st = t[keys[i]];
+            if (st && st.armed) {
+                armedCount++;
+                detail.push(keys[i]);
+            }
+        }
         if (ba.armed) {
-            return '，开机自启已启用 ✓';
+            return '，开机自启已启用 ✓（触发源 ' + armedCount + '/' + keys.length +
+                '：' + (detail.join('/') || '无') + '）';
         }
         var s = '，⚠ 开机自启启用失败';
         if (ba.error) { s += '（' + ba.error + '）'; }

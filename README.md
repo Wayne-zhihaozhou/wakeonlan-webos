@@ -58,9 +58,10 @@ wakeonlan-webos/
      `luna://com.woltv.wakeonlan.service`。
    - **开机自动拉起的机制（重要）**：LG webOS 不会主动拉起第三方应用的 JS Service（它只在
      打开应用 / 总线调用时才启动）。因此本项目用 webOS **Activity Manager**（`com.palm.activitymanager`）
-     注册了一个**持久化带触发器的 Activity**：电视开机（`tvpower/powerState` 状态变化）即触发，
-     回调直接调用 `wake` 方法发魔术包。持久化 Activity 存在 DB8，每次开机都会由系统自动重新武装，
-     从而无需打开应用即可实现「电视开机→电脑开机」。
+     注册了**多个持久化、带触发器的 Activity（多条件触发）**：电视开机时任一触发源 fire
+     （`tvpower/powerState` 电源变化、`connectionmanager/getStatus` 网络就绪、`displayStatus`
+     屏幕亮起）即回调 `wake` 方法发魔术包。持久化 Activity 存在 DB8，每次开机都会由系统自动重新武装，
+     从而无需打开应用即可实现「电视开机→电脑开机」。多个触发源互为冗余，提高触发稳定性。
    - 服务进程被拉起后，会先读配置（短超时兜底），若 `enabled` 且 `sendOnBoot` 为真，**不做任何
      网络/电源检测**，直接进入 **90 秒发送窗口**，每 2 秒循环发送一次魔术包（`dgram` UDP），
      确保电脑一定能收到。
@@ -120,13 +121,16 @@ ares-log --device <设备名> com.woltv.wakeonlan.service
 
 - 本方案把自动发送放在 **JS Service**（后台进程）里，而不是放在网页应用里，因此
   **不会弹出任何界面**，符合「默认无弹窗后台执行」的需求。
-- **开机自动发送依赖 Activity Manager 的持久化触发器，而不是「webOS 自动拉起服务」**。
-  首次在应用里**保存设置**时，后台服务会向 `com.palm.activitymanager` 注册一个持久化 Activity；
-  之后电视每次开机（`tvpower/powerState` 状态变化）即自动触发发送，无需再打开应用。
-  开机后服务会**连续 90 秒每 2 秒循环发送一次**魔术包（不做网络/电源检测），电脑基本必醒。
-  界面状态栏会显示「开机自启已启用 ✓」。
-  验证：开机后观察 `ares-log` 应打印 `wol: boot auto-launch armed` 和 `wol: magic packet sent to ...`。
-  若固件权限较严导致 `create` 失败（打印 `boot auto-launch FAILED`），应用仍可手动唤醒（点「立即唤醒」）。
+- **开机自动发送依赖 Activity Manager 的持久化触发器（多条件触发），而不是「webOS 自动拉起服务」**。
+  首次在应用里**保存设置**时，后台服务会向 `com.palm.activitymanager` 注册**多个持久化 Activity**，
+  每个对应一个触发源：`tvpower/powerState`（电源变化）、`connectionmanager/getStatus`（网络就绪）、
+  `systemservice/displayStatus`（屏幕亮起）。之后电视每次开机，**任一触发源 fire** 即自动触发发送，
+  无需再打开应用；多源冗余能显著提高触发稳定性（某个源在特定固件/场景不触发时，其它源仍可唤醒）。
+  开机后服务会**连续 90 秒每 2 秒循环发送一次**魔术包（不做网络检测），电脑基本必醒。
+  界面状态栏会显示「开机自启已启用 ✓（触发源 X/3：…）」。
+  验证：开机后观察 `ares-log` 应打印 `wol: trigger[xxx] ARMED` 和 `wol: magic packet sent to ...`。
+  若固件权限较严导致某个 `create` 失败（打印 `trigger[xxx] FAILED`），其余成功的触发源仍生效，
+  应用也仍可手动唤醒（点「立即唤醒」）。
 - **⚠ 短待机（快速启动）可能不触发**：若电视开启了「即时开机 / Quick Start+ / 快速启动」，
   遥控器关电视后**短时间内**再开机属于浅待机唤醒，`powerState` 可能没有变化，基于「变化」的
   触发器不会 fire，电脑不会醒（长待机/彻底断电后再开机则正常）。两个应对：
