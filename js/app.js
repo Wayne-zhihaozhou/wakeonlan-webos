@@ -1,15 +1,3 @@
-/*
- * Front-end app for Wake on LAN (webOS TV)
- * -----------------------------------------
- * Uses the built-in PalmServiceBridge to call the JS service
- * `com.woltv.wakeonlan.service` (no external webOSTV.js needed).
- *
- * - Scans the LAN and lets the user pick the target device from a dropdown
- *   (much easier than typing MAC/IP with a TV remote).
- * - Fully navigable with the TV remote: direction keys move focus, OK
- *   activates the focused control.
- */
-
 (function () {
     'use strict';
 
@@ -22,6 +10,8 @@
         mac: document.getElementById('mac'),
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
+        sendInterval: document.getElementById('sendInterval'),
+        pullInterval: document.getElementById('pullInterval'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
         swEnabled: document.getElementById('swEnabled'),
@@ -32,11 +22,8 @@
         status: document.getElementById('status')
     };
 
-    var devicesCache = []; // last scan results
+    var devicesCache = [];
 
-    /* ---------------- service call helper (PalmServiceBridge) ------- */
-    // webOS 要求 onservicecallback 返回 true，否则某些固件会丢弃响应导致卡住；
-    // 再加超时兜底，保证界面永远不会卡在「保存中」。扫描类调用可传更长超时。
     var CALL_TIMEOUT = 12000;
 
     function callService(method, params, timeoutMs) {
@@ -63,7 +50,7 @@
                 } else {
                     settle(reject, msg || { errorText: '服务返回未知错误' });
                 }
-                return true; // 关键：webOS 需要回调返回 true
+                return true;
             };
 
             setTimeout(function () {
@@ -78,7 +65,6 @@
         });
     }
 
-    /* ---------------- status helpers -------------------------------- */
     function setStatus(text, kind) {
         els.status.textContent = text;
         els.status.className = 'status' + (kind ? ' ' + kind : '');
@@ -88,23 +74,19 @@
         setStatus('错误: ' + (err && (err.errorText || err.message) || '未知错误'), 'err');
     }
 
-    /* ---------------- device dropdown ------------------------------- */
-    // 使用自定义下拉列表（非原生 <select>），否则 webOS 电视上的系统原生
-    // 下拉弹层会吞掉遥控器返回键，导致用户进入列表后无法退出。
     function macLabel(mac) {
         return String(mac || '').toUpperCase();
     }
 
-    var deviceOptions = []; // [{ value, label }]
-    var deviceSelected = 0; // index of the chosen option
+    var deviceOptions = [];
+    var deviceSelected = 0;
     var deviceOpen = false;
-    var deviceActive = 0;   // index of the highlighted option while open
+    var deviceActive = 0;
 
     function rebuildDeviceList(devices, broadcast) {
         devicesCache = devices || [];
         deviceOptions = [];
 
-        // 1) Preserve the currently saved target as the first option.
         var curMac = macLabel(els.mac.value.trim());
         var curIp = els.ip.value.trim();
         if (curMac && curMac.length >= 12) {
@@ -116,7 +98,6 @@
             deviceOptions.push({ value: '', label: '—— 请选择设备 ——' });
         }
 
-        // 2) Discovered devices.
         if (broadcast) {
             deviceOptions.push({
                 value: 'broadcast:' + broadcast,
@@ -154,7 +135,6 @@
         els.deviceList.appendChild(frag);
     }
 
-    // Index of the option matching the current MAC (fall back to 0).
     function matchCurrentIndex() {
         var curMac = macLabel(els.mac.value.trim());
         for (var i = 0; i < deviceOptions.length; i++) {
@@ -233,7 +213,6 @@
     function scanDevices() {
         setStatus('正在扫描局域网…');
         els.scan.disabled = true;
-        // scan 后端要做整段子网的探测，给它更长的超时（默认只有 12s）。
         callService('scan', {}, 30000)
             .then(function (res) {
                 var devs = res.devices || [];
@@ -245,7 +224,6 @@
                 }
             })
             .catch(function (err) {
-                // Scan may be unavailable on some firmware; fall back to manual.
                 rebuildDeviceList([], null);
                 var msg = (err && (err.errorText || err.message)) || '未知错误';
                 setStatus('扫描失败：' + msg + '。请手动填写 MAC 地址。', 'err');
@@ -255,8 +233,6 @@
             });
     }
 
-    /* ---------------- load / save ----------------------------------- */
-    // 默认目标电脑 MAC（硬编码，装完即用，不用遥控打字）。
     var DEFAULT_MAC = 'CC:28:AA:A7:B4:1F';
 
     function ensureMacDefault() {
@@ -270,17 +246,20 @@
                 els.mac.value = c.mac || '';
                 els.ip.value = c.ip || '255.255.255.255';
                 els.port.value = c.port || 9;
+                els.sendInterval.value = c.sendIntervalSec || 1;
+                els.pullInterval.value = c.pullIntervalSec || 20;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
-                ensureMacDefault(); // 存的是空就回退到默认 MAC
+                ensureMacDefault();
                 rebuildDeviceList([], null);
                 setStatus('已加载设置。可点「扫描设备」选择目标。', 'ok');
             })
             .catch(function () {
-                // First run: nothing stored yet. Use the hardcoded default.
                 els.mac.value = DEFAULT_MAC;
                 els.ip.value = '255.255.255.255';
                 els.port.value = 9;
+                els.sendInterval.value = 1;
+                els.pullInterval.value = 20;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
                 rebuildDeviceList([], null);
@@ -293,6 +272,8 @@
             mac: els.mac.value.trim(),
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
+            sendIntervalSec: parseInt(els.sendInterval.value, 10) || 1,
+            pullIntervalSec: parseInt(els.pullInterval.value, 10) || 20,
             enabled: els.enabled.checked,
             sendOnBoot: els.sendOnBoot.checked
         };
@@ -305,9 +286,8 @@
 
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
-        // 触发源（net）。
         var t = ba.triggers || {};
-        var keys = ['net'];
+        var keys = ['net', 'pull'];
         var armedCount = 0;
         var detail = [];
         for (var i = 0; i < keys.length; i++) {
@@ -329,7 +309,7 @@
     function lastWolTxt(ba) {
         if (!ba || !ba.armed) { return ''; }
         var m = {
-            sent: '已发送 ✓',
+            sent: '持续发送中 ✓',
             error: '发送失败',
             none: '尚未发送'
         };
@@ -365,27 +345,22 @@
             .catch(showError);
     }
 
-    /* ---------------- exit app -------------------------------------- */
-    // 点击「退出」按钮时关闭应用，返回 webOS 桌面。webOS 中应用主窗口是
-    // 系统创建的子窗口，因此 window.close() 即可终止并退出；部分固件支持
-    // PalmSystem.close()，一并尝试兜底。
     function exitApp() {
         try {
             if (window.PalmSystem && typeof window.PalmSystem.close === 'function') {
                 window.PalmSystem.close();
                 return;
             }
-        } catch (e) { /* ignore and fall through */ }
+        } catch (e) { }
         try {
             window.close();
-        } catch (e) { /* ignore */ }
+        } catch (e) { }
     }
 
-    /* ---------------- remote control navigation --------------------- */
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot,
+            els.swEnabled, els.swSendOnBoot, els.sendInterval, els.pullInterval,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -412,53 +387,44 @@
         else if (el.tagName === 'BUTTON') { el.click(); }
     }
 
-    /* ---------------- deferred keyboard for text fields -------------- */
-    // webOS 会在文本框获得焦点时立刻弹出系统软键盘，但用户往往只是在
-    // 用方向键「路过」这些输入框，并不想马上打字。因此让输入框平时保持
-    // readonly（聚焦不弹键盘），只有用户对某个输入框按 OK、明确要输入时
-    // 才解除 readonly，这时系统才会弹出键盘。编辑结束（失焦）后自动恢复
-    // readonly，下次再聚焦不会打扰。
     function isEditableInput(el) {
-        return el && (el === els.mac || el === els.ip || el === els.port);
+        return el && (el === els.mac || el === els.ip || el === els.port || el === els.sendInterval || el === els.pullInterval);
     }
 
-    ['mac', 'ip', 'port'].forEach(function (key) {
+    ['mac', 'ip', 'port', 'sendInterval', 'pullInterval'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
-            this.readOnly = true; // 结束编辑/移开焦点后再次锁定
+            this.readOnly = true;
         });
     });
 
     document.addEventListener('keydown', function (e) {
         var key = e.keyCode;
 
-        // While the device list is open, route keys inside it.
         if (deviceOpen) {
-            if (key === 40 || key === 38) {      // down / up: move highlight
+            if (key === 40 || key === 38) {
                 e.preventDefault();
                 moveActive(key === 40 ? 1 : -1);
                 return;
             }
-            if (key === 13) {                    // OK: choose highlighted option
+            if (key === 13) {
                 e.preventDefault();
                 chooseActive();
                 return;
             }
-            if (key === 461 || key === 8 || key === 27) { // Back / Exit / Esc
+            if (key === 461 || key === 8 || key === 27) {
                 e.preventDefault();
-                closeDropdown();                 // exit the list
+                closeDropdown();
                 return;
             }
-            if (key === 37 || key === 39) {      // left / right: exit list, continue page nav
+            if (key === 37 || key === 39) {
                 closeDropdown();
-                // fall through to normal focus navigation
             } else {
-                return;                          // swallow other keys while open
+                return;
             }
         }
 
         var active = document.activeElement;
 
-        // Direction keys: move focus.
         if (key === 38 || key === 40 || key === 37 || key === 39) {
             e.preventDefault();
             var idx = currentIndex();
@@ -467,11 +433,9 @@
             return;
         }
 
-        // OK / Enter: activate.
         if (key === 13) {
             e.preventDefault();
             var act = document.activeElement;
-            // 对仍处于锁定的输入框按 OK：解除 readonly，此时系统才弹软键盘。
             if (isEditableInput(act) && act.readOnly) {
                 act.readOnly = false;
                 act.focus();
@@ -481,18 +445,11 @@
             return;
         }
 
-        // Back / Exit on the main page: this is a single-screen app, so there
-        // is no internal page to "go back" to — the expected behaviour is to
-        // close the app and return to the launcher. Deliberately do NOT
-        // preventDefault here: let webOS's default action close the app window.
-        // (Backspace/8 only matters while typing in a field, where the browser
-        // default of deleting a character is exactly what we want.)
         if (key === 461 || key === 8) {
             return;
         }
     });
 
-    /* ---------------- wire up --------------------------------------- */
     els.scan.addEventListener('click', scanDevices);
     els.device.addEventListener('click', function () {
         if (deviceOpen) { closeDropdown(); }
@@ -503,10 +460,8 @@
     els.wake.addEventListener('click', wakeNow);
 
     loadConfig();
-    // Give the TV remote something focused right away.
     window.setTimeout(function () { focusAt(0); }, 300);
 
-    // 后台服务自检：getStatus 不依赖 DB，若它也超时说明服务进程没起来/崩了。
     callService('getStatus', {}, 6000)
         .then(function (res) {
             setStatus('后台服务正常' +
