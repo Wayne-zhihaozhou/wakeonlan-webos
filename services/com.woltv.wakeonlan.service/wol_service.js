@@ -582,85 +582,31 @@ function runBootSendLoop(cfg) {
         return;
     }
 
-    // 电源守卫：tvpower/powerState 触发器在「待机->开机」和「开机->待机」两个
-    // 方向都会 fire 并拉起服务。若电视当前不是开机（Active）状态（例如用户刚
-    // 按遥控器让电视进待机、触发器顺势拉起了本服务），绝不能进入发送窗口，
-    // 否则会把刚关机的电脑又唤醒。查询失败按 Active 处理（fail-open）。
-    isTvActive(function (active, state) {
-        bootAutoState.lastPowerState = state;
-        if (!active) {
-            bootAutoState.lastWol = 'skip';
+    // 开机即发，不做任何检测：90 秒窗口内每 2 秒循环发送一次魔术包。
+    var windowStart = Date.now();
+    var sent = 0;
+
+    function sendOnce() {
+        if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
+            bootAutoState.lastWol = 'done';
             bootLoopRunning = false;
-            console.log('wol: TV powerState=' + state + ' (not Active); boot send skipped');
+            console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
             return;
         }
-        startBootSendWindow(cfg);
-    });
-
-    function startBootSendWindow(cfg) {
-        var waitStart = Date.now();
-
-        // 关键修复：电视冷开机后 Wi-Fi 还没连上，此时立刻发广播包根本出不去
-        // （这就是「手动测试能唤醒、开机自动却不醒」的根因）。先等网络真正
-        // 就绪（有真实 IPv4 且有默认路由）再进入发送窗口；最多等 30s，超时
-        // 也照发，避免永久卡住。
-        function waitReady() {
-            if (networkReady()) {
-                console.log('wol: network ready after ' + (Date.now() - waitStart) + 'ms; starting boot send');
-                startWindow();
-                return;
-            }
-            if (Date.now() - waitStart >= BOOT_NET_WAIT_TIMEOUT_MS) {
+        sendWOL(cfg, function (err) {
+            if (err) {
                 bootAutoState.lastWol = 'error';
-                console.log('wol: network not ready within ' + BOOT_NET_WAIT_TIMEOUT_MS +
-                    'ms; sending anyway');
-                startWindow();
-                return;
+                console.log('wol: boot send failed: ' + err.message);
+            } else {
+                sent++;
+                bootAutoState.lastWol = 'sent';
+                recordSend(true, '');
+                console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
             }
-            setTimeout(waitReady, BOOT_NET_POLL_MS);
-        }
-
-        function startWindow() {
-            var windowStart = Date.now();
-            var sent = 0;
-
-            function sendOnce() {
-                if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
-                    bootAutoState.lastWol = 'done';
-                    bootLoopRunning = false;
-                    console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
-                    return;
-                }
-                // 窗口期内每次发包前再确认电视仍在开机状态；用户中途让电视进
-                // 待机则提前结束窗口，避免持续把已关机的电脑唤醒。
-                isTvActive(function (active, state) {
-                    if (!active) {
-                        bootAutoState.lastWol = 'skip';
-                        bootAutoState.lastPowerState = state;
-                        bootLoopRunning = false;
-                        console.log('wol: TV powerState=' + state +
-                            '; stop boot send loop early (' + sent + ' packets sent)');
-                        return;
-                    }
-                    sendWOL(cfg, function (err) {
-                        if (err) {
-                            bootAutoState.lastWol = 'error';
-                            console.log('wol: boot send failed: ' + err.message);
-                        } else {
-                            sent++;
-                            bootAutoState.lastWol = 'sent';
-                            recordSend(true, '');
-                            console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
-                        }
-                    });
-                    setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
-                });
-            }
-            sendOnce();
-        }
-
-        waitReady();
+        });
+        setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
     }
+    sendOnce();
 }
 
 try {
@@ -681,42 +627,15 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        if (p.fromBoot) {
-            // 来自 Activity 触发器（开机/待机唤醒路径）：tvpower/powerState 在
-            // 「待机->开机」和「开机->待机」两个方向都会 fire，必须先确认电视
-            // 当前确实处于开机（Active）状态才发包，否则用户按遥控器让电视进
-            // 待机时会把刚关机的电脑又唤醒。查询失败按 Active 处理（fail-open）。
-            isTvActive(function (active, state) {
-                bootAutoState.lastPowerState = state;
-                if (!active) {
-                    bootAutoState.lastWol = 'skip';
-                    console.log('wol: boot trigger fired but TV powerState=' + state +
-                        ' (not Active); skip wake');
-                    message.respond({ returnValue: true, sent: false, skipped: true, powerState: state });
-                    return;
-                }
-                sendMagicPacket(cfg, function (sendErr) {
-                    if (sendErr) {
-                        bootAutoState.lastWol = 'error';
-                        message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
-                    } else {
-                        bootAutoState.lastWol = 'sent';
-                        console.log('wol: boot wake sent -> ' + cfg.mac + ' (powerState=' + state + ')');
-                        message.respond({ returnValue: true, sent: true, powerState: state });
-                    }
-                });
-            });
-            return;
-        }
-
-        // 手动触发（应用内按钮）：直接发送一次魔术包，不做网络就绪等复杂判断。
+        // 手动触发或开机触发器回调（fromBoot）一律直接发一次魔术包，
+        // 不做电源/网络检测。
         sendMagicPacket(cfg, function (sendErr) {
             if (sendErr) {
                 bootAutoState.lastWol = 'error';
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
                 bootAutoState.lastWol = 'sent';
-                console.log('wol: wake sent -> ' + cfg.mac);
+                console.log('wol: wake sent -> ' + cfg.mac + (p.fromBoot ? ' (fromBoot)' : ''));
                 message.respond({ returnValue: true, sent: true });
             }
         });
@@ -763,8 +682,6 @@ service.register('getStatus', function (message) {
     message.respond({
         returnValue: true,
         lastSend: lastSend,
-        networkReady: networkReady(),
-        localIp: getLocalIpv4(),
         bootAuto: bootAutoState
     });
 });

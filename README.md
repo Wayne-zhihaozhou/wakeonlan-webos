@@ -58,11 +58,12 @@ wakeonlan-webos/
      `luna://com.woltv.wakeonlan.service`。
    - **开机自动拉起的机制（重要）**：LG webOS 不会主动拉起第三方应用的 JS Service（它只在
      打开应用 / 总线调用时才启动）。因此本项目用 webOS **Activity Manager**（`com.palm.activitymanager`）
-     注册了一个**持久化带触发器的 Activity**：电视开机、网络就绪（`connectionmanager` 状态变化）时
-     触发，回调直接调用 `wake` 方法发魔术包。持久化 Activity 存在 DB8，每次开机都会由系统自动重新武装，
+     注册了一个**持久化带触发器的 Activity**：电视开机（`tvpower/powerState` 状态变化）即触发，
+     回调直接调用 `wake` 方法发魔术包。持久化 Activity 存在 DB8，每次开机都会由系统自动重新武装，
      从而无需打开应用即可实现「电视开机→电脑开机」。
-   - 服务进程被拉起后，会先并行读配置（短超时兜底），若 `enabled` 且 `sendOnBoot` 为真，网络一就绪
-     便立即用 `dgram` 发送魔术包（无固定延迟）。
+   - 服务进程被拉起后，会先读配置（短超时兜底），若 `enabled` 且 `sendOnBoot` 为真，**不做任何
+     网络/电源检测**，直接进入 **90 秒发送窗口**，每 2 秒循环发送一次魔术包（`dgram` UDP），
+     确保电脑一定能收到。
    - 魔术包 = 6 字节 `0xFF` + 目标 MAC 重复 16 遍，发往 UDP 端口 9（可改 7）。
 2. **配置持久化（DB8）**
    - 用 `luna://com.palm.db`（DB8）存储 `com.woltv.wakeonlan:1` kind。
@@ -121,7 +122,9 @@ ares-log --device <设备名> com.woltv.wakeonlan.service
   **不会弹出任何界面**，符合「默认无弹窗后台执行」的需求。
 - **开机自动发送依赖 Activity Manager 的持久化触发器，而不是「webOS 自动拉起服务」**。
   首次在应用里**保存设置**时，后台服务会向 `com.palm.activitymanager` 注册一个持久化 Activity；
-  之后电视每次开机、网络一就绪即自动触发发送，无需再打开应用。界面状态栏会显示「开机自启已启用 ✓」。
+  之后电视每次开机（`tvpower/powerState` 状态变化）即自动触发发送，无需再打开应用。
+  开机后服务会**连续 90 秒每 2 秒循环发送一次**魔术包（不做网络/电源检测），电脑基本必醒。
+  界面状态栏会显示「开机自启已启用 ✓」。
   验证：开机后观察 `ares-log` 应打印 `wol: boot auto-launch armed` 和 `wol: magic packet sent to ...`。
   若固件权限较严导致 `create` 失败（打印 `boot auto-launch FAILED`），应用仍可手动唤醒（点「立即唤醒」）。
 

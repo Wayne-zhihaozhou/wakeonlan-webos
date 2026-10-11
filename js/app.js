@@ -319,17 +319,10 @@
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
         if (ba.armed) {
-            var t = '，开机自启已启用 ✓';
-            if (ba.trigger) {
-                // 显示实际生效的触发器（如 tvpower/powerState），便于确认走的是哪条链路。
-                var trig = String(ba.trigger).replace(/^luna:\/\//, '');
-                t += '（' + trig + '）';
-            }
-            return t;
+            return '，开机自启已启用 ✓';
         }
         var s = '，⚠ 开机自启启用失败';
         if (ba.error) { s += '（' + ba.error + '）'; }
-        if (ba.diag) { s += '；诊断：' + ba.diag; }
         return s;
     }
 
@@ -337,15 +330,11 @@
         if (!ba || !ba.armed) { return ''; }
         var m = {
             sent: '已发送 ✓',
-            timeout: '等网络就绪超时（未发出）',
             error: '发送失败',
             done: '90秒循环发送已完成',
-            skip: '电视非开机状态，跳过唤醒',
             none: '开机后尚未触发'
         };
-        var s = '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
-        if (ba.lastPowerState) { s += '（电源状态=' + ba.lastPowerState + '）'; }
-        return s;
+        return '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
     }
 
     function saveConfig() {
@@ -523,7 +512,7 @@
     // 后台服务自检：getStatus 不依赖 DB，若它也超时说明服务进程没起来/崩了。
     callService('getStatus', {}, 6000)
         .then(function (res) {
-            setStatus('后台服务正常' + (res.localIp ? '，本机 ' + res.localIp : '') +
+            setStatus('后台服务正常' +
                 bootAutoTxt(res && res.bootAuto) +
                 lastWolTxt(res && res.bootAuto) + '。', 'ok');
         })
