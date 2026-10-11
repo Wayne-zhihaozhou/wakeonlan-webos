@@ -60,7 +60,7 @@
             <div class="row switch-row">
                 <div class="field grow">
                     <label>开机自动发送</label>
-                    <p class="hint">电视开机后（服务被拉起）每 sendIntervalSec 秒持续发送一次魔术包，直到服务退出——无脑持续发送，不依赖任何屏幕/电源触发信号，兼容「即时开机 / Quick Start+」的短待机唤醒，确保电脑被唤醒。</p>
+                    <p class="hint">电视开机后由系统周期 Activity 每 sendIntervalSec 秒拉起服务并发送一次魔术包，累计发送 sendMaxCount 次后自动停止。不依赖任何屏幕/电源触发信号，兼容「即时开机 / Quick Start+」的短待机唤醒，确保电脑被唤醒。</p>
                 </div>
                 <label id="swSendOnBoot" class="switch" tabindex="0">
                     <input type="checkbox" id="sendOnBoot" checked>
@@ -71,14 +71,12 @@
                 <div class="field small">
                     <label for="sendInterval">发送间隔（秒）</label>
                     <input id="sendInterval" type="number" value="1" min="1" max="3600" readonly>
-                    <p class="hint">服务存活期间每这么多秒发一次魔术包。默认 1 秒（最快唤醒）。</p>
+                    <p class="hint">系统周期 Activity 每这么多秒拉起一次服务并发送一次魔术包。默认 1 秒（最快唤醒）。</p>
                 </div>
-            </div>
-            <div class="row">
                 <div class="field small">
-                    <label for="pullInterval">拉起间隔（秒）</label>
-                    <input id="pullInterval" type="number" value="20" min="5" max="3600" readonly>
-                    <p class="hint">系统每这么多秒主动拉起一次后台服务并使其常驻，保证电视开机后（无需手动打开应用）服务自动运行、持续发送。默认 20 秒。</p>
+                    <label for="sendMaxCount">发送次数上限（次）</label>
+                    <input id="sendMaxCount" type="number" value="100" min="1" max="100000" readonly>
+                    <p class="hint">累计发送达到该次数后自动停止（取消周期 Activity）。默认 100 次。</p>
                 </div>
             </div>
         </section>

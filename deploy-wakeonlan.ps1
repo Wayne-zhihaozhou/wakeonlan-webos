@@ -134,13 +134,22 @@ if ($info -match 'modelName|sdkVersion|boardType') {
     Warn "ares-device -i 未能读取信息（可能命令格式不同，跳过，交由安装步骤验证）: $($info.Trim())"
 }
 
-# 6. 打包（必须同时传 app 目录 + 服务目录）
+# 6. 打包（只打包应用运行所需文件，排除 .md/.ps1/.txt 等非应用文件）
 Say "`n[6/7] 打包应用 ..."
 $svcDir = Join-Path $ProjectDir 'services\com.woltv.wakeonlan.service'
 $dist   = Join-Path $ProjectDir 'dist'
+$stage  = Join-Path $env:TEMP ("wol-stage-" + [guid]::NewGuid().ToString('N'))
+$stageApp = Join-Path $stage 'app'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
+New-Item -ItemType Directory -Force -Path $stageApp | Out-Null
 Get-ChildItem "$dist\*.ipk" -ErrorAction SilentlyContinue | Remove-Item -Force
-$pkgOut = & ares-package $ProjectDir $svcDir -o $dist 2>&1 | Out-String
+$appFiles = @('appinfo.json','index.html','js','css','icon.png','largeIcon.png')
+foreach ($f in $appFiles) {
+    $src = Join-Path $ProjectDir $f
+    if (Test-Path $src) { Copy-Item -Path $src -Destination $stageApp -Recurse -Force }
+}
+$pkgOut = & ares-package $stageApp $svcDir -o $dist 2>&1 | Out-String
+Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
 $ipk = Get-ChildItem -Path $dist -Filter '*.ipk' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($ipk) { Ok "打包完成: $($ipk.Name)"; $summary += 'OK package' }
 else { Fail "打包失败: $pkgOut"; $summary += 'FAIL package'; exit 1 }

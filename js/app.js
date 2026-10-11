@@ -11,7 +11,7 @@
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
         sendInterval: document.getElementById('sendInterval'),
-        pullInterval: document.getElementById('pullInterval'),
+        sendMaxCount: document.getElementById('sendMaxCount'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
         swEnabled: document.getElementById('swEnabled'),
@@ -247,7 +247,7 @@
                 els.ip.value = c.ip || '255.255.255.255';
                 els.port.value = c.port || 9;
                 els.sendInterval.value = c.sendIntervalSec || 1;
-                els.pullInterval.value = c.pullIntervalSec || 20;
+                els.sendMaxCount.value = c.sendMaxCount || 100;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
                 ensureMacDefault();
@@ -259,7 +259,7 @@
                 els.ip.value = '255.255.255.255';
                 els.port.value = 9;
                 els.sendInterval.value = 1;
-                els.pullInterval.value = 20;
+                els.sendMaxCount.value = 100;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
                 rebuildDeviceList([], null);
@@ -273,7 +273,7 @@
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
             sendIntervalSec: parseInt(els.sendInterval.value, 10) || 1,
-            pullIntervalSec: parseInt(els.pullInterval.value, 10) || 20,
+            sendMaxCount: parseInt(els.sendMaxCount.value, 10) || 100,
             enabled: els.enabled.checked,
             sendOnBoot: els.sendOnBoot.checked
         };
@@ -287,7 +287,7 @@
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
         var t = ba.triggers || {};
-        var keys = ['net', 'pull'];
+        var keys = ['pull'];
         var armedCount = 0;
         var detail = [];
         for (var i = 0; i < keys.length; i++) {
@@ -360,7 +360,7 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.sendInterval, els.pullInterval,
+            els.swEnabled, els.swSendOnBoot, els.sendInterval, els.sendMaxCount,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -388,10 +388,10 @@
     }
 
     function isEditableInput(el) {
-        return el && (el === els.mac || el === els.ip || el === els.port || el === els.sendInterval || el === els.pullInterval);
+        return el && (el === els.mac || el === els.ip || el === els.port || el === els.sendInterval || el === els.sendMaxCount);
     }
 
-    ['mac', 'ip', 'port', 'sendInterval', 'pullInterval'].forEach(function (key) {
+    ['mac', 'ip', 'port', 'sendInterval', 'sendMaxCount'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true;
         });

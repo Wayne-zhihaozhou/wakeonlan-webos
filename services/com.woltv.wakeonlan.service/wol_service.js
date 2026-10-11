@@ -16,7 +16,8 @@ var DEFAULT_CONFIG = {
     port: 9,
     broadcast: true,
     sendIntervalSec: 1,
-    pullIntervalSec: 20
+    sendMaxCount: 100,
+    sendCount: 0
 };
 
 var service = new Service(SERVICE_NAME);
@@ -26,16 +27,6 @@ var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
 var KEEPALIVE_ACTIVITY_NAME = BOOT_ACTIVITY_NAME + '.keepalive';
 var bootAutoState = { armed: false, error: '', lastWol: 'none', triggers: {} };
-
-var BOOT_TRIGGERS = [
-    {
-        key: 'net',
-        name: BOOT_ACTIVITY_NAME + '.net',
-        method: 'luna://com.webos.service.connectionmanager/getStatus',
-        params: { subscribe: true },
-        desc: 'Network ready after cold boot'
-    }
-];
 
 var configCache = null;
 
@@ -79,8 +70,10 @@ function normalizeConfig(c) {
         broadcast: c ? c.broadcast !== false : true,
         sendIntervalSec: (c && typeof c.sendIntervalSec === 'number' && c.sendIntervalSec >= 1)
             ? c.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec,
-        pullIntervalSec: (c && typeof c.pullIntervalSec === 'number' && c.pullIntervalSec >= 5)
-            ? c.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec
+        sendMaxCount: (c && typeof c.sendMaxCount === 'number' && c.sendMaxCount >= 1)
+            ? c.sendMaxCount : DEFAULT_CONFIG.sendMaxCount,
+        sendCount: (c && typeof c.sendCount === 'number' && c.sendCount >= 0)
+            ? c.sendCount : DEFAULT_CONFIG.sendCount
     };
 }
 
@@ -109,8 +102,10 @@ function saveConfig(cfg, cb) {
         obj.broadcast = cfg.broadcast !== false;
         obj.sendIntervalSec = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
             ? cfg.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
-        obj.pullIntervalSec = (typeof cfg.pullIntervalSec === 'number' && cfg.pullIntervalSec >= 5)
-            ? cfg.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec;
+        obj.sendMaxCount = (typeof cfg.sendMaxCount === 'number' && cfg.sendMaxCount >= 1)
+            ? cfg.sendMaxCount : DEFAULT_CONFIG.sendMaxCount;
+        obj.sendCount = (typeof cfg.sendCount === 'number' && cfg.sendCount >= 0)
+            ? cfg.sendCount : DEFAULT_CONFIG.sendCount;
 
         configCache = normalizeConfig(obj);
 
@@ -135,91 +130,55 @@ function saveConfig(cfg, cb) {
     });
 }
 
-function setBootAuto(enabled, cb) {
+function cancelKeepalive(cb) {
     var done = cb || function () {};
-    if (!enabled) {
-        var cancelNames = BOOT_TRIGGERS.map(function (t) { return t.name; });
-        cancelNames.push(KEEPALIVE_ACTIVITY_NAME);
-        var pendingCancels = cancelNames.length;
-        function finishCancel() {
-            bootAutoState.armed = false;
-            bootAutoState.error = '';
-            done(null);
-        }
-        if (pendingCancels === 0) { finishCancel(); return; }
-        cancelNames.forEach(function (name) {
-            lunaCall(AM_URI, 'cancel', { name: name }, function () {
-                if (--pendingCancels <= 0) { finishCancel(); }
-            }, 6000);
-        });
-        return;
-    }
-
-    var pullKey = 'pull';
-    var remaining = BOOT_TRIGGERS.length + 1;
-    var anyArmed = false;
-    var lastError = '';
-
-    function maybeFinish() {
-        if (remaining > 0) { return; }
-        bootAutoState.armed = anyArmed;
-        bootAutoState.error = anyArmed ? '' : (lastError || 'all triggers failed');
-        done(anyArmed ? null : new Error(bootAutoState.error));
-    }
-
-    var pullInterval = (configCache && typeof configCache.pullIntervalSec === 'number')
-        ? configCache.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec;
-    if (pullInterval < 5) { pullInterval = 5; }
-    lunaCall(AM_URI, 'create', {
-        activity: {
-            name: KEEPALIVE_ACTIVITY_NAME,
-            description: 'Periodically pull up WOL service to send magic packets on every TV power-on',
-            type: { background: true, persist: true },
-            schedule: { interval: pullInterval + 's', precise: true },
-            callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromPull: true, source: pullKey } }
-        },
-        replace: true,
-        start: true,
-        subscribe: true
-    }, function (res) {
-        var ok = !!(res && res.returnValue);
-        var pullAid = res && res.activityId;
-        bootAutoState.triggers[pullKey] = {
-            armed: ok,
-            error: ok ? '' : ((res && (res.errorText || res.error)) || 'pull activity create failed')
-        };
-        if (ok) { anyArmed = true; } else { lastError = bootAutoState.triggers[pullKey].error; }
-        if (ok && pullAid) {
-            lunaCall(AM_URI, 'adopt', { activityId: pullAid, wait: false, subscribe: true }, function () {
-            }, 6000);
-        }
-        remaining--;
-        maybeFinish();
+    lunaCall(AM_URI, 'cancel', { name: KEEPALIVE_ACTIVITY_NAME }, function () {
+        bootAutoState.armed = false;
+        bootAutoState.error = '';
+        done(null);
     }, 6000);
+}
 
-    BOOT_TRIGGERS.forEach(function (trg) {
+function armBootAuto(cb) {
+    var done = cb || function () {};
+    var base = configCache || JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+    base.sendCount = 0;
+    saveConfig(base, function () {
+        var sendInterval = (configCache && typeof configCache.sendIntervalSec === 'number')
+            ? configCache.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
+        if (sendInterval < 1) { sendInterval = 1; }
+        var pullKey = 'pull';
         lunaCall(AM_URI, 'create', {
             activity: {
-                name: trg.name,
-                description: 'Wake-on-LAN trigger (' + trg.desc + ')',
+                name: KEEPALIVE_ACTIVITY_NAME,
+                description: 'Periodically send WOL magic packets on every TV power-on',
                 type: { background: true, persist: true },
-                trigger: { method: trg.method, params: trg.params },
-                callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromBoot: true, source: trg.key } }
+                schedule: { interval: sendInterval + 's', precise: true },
+                callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromPull: true, source: pullKey } }
             },
             replace: true,
             start: true,
             subscribe: true
         }, function (res) {
             var ok = !!(res && res.returnValue);
-            bootAutoState.triggers[trg.key] = {
+            bootAutoState.triggers[pullKey] = {
                 armed: ok,
-                error: ok ? '' : ((res && (res.errorText || res.error)) || 'activity create failed')
+                error: ok ? '' : ((res && (res.errorText || res.error)) || 'pull activity create failed')
             };
-            if (ok) { anyArmed = true; } else { lastError = bootAutoState.triggers[trg.key].error; }
-            remaining--;
-            maybeFinish();
+            bootAutoState.armed = ok;
+            bootAutoState.error = ok ? '' : bootAutoState.triggers[pullKey].error;
+            done(ok ? null : new Error(bootAutoState.error));
         }, 6000);
     });
+}
+
+function setBootAuto(enabled, cb) {
+    var done = cb || function () {};
+    if (!enabled) {
+        cancelKeepalive(done);
+        return;
+    }
+    armBootAuto(done);
 }
 
 function getLocalIpv4() {
@@ -474,47 +433,27 @@ function sendMagicPacket(cfg, cb) {
     });
 }
 
-var bootLoopRunning = false;
-
-function startBootAutosend() {
-    var sendCfg = configCache ? JSON.parse(JSON.stringify(configCache))
-                              : JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-
-    dbCall('find', { query: { from: KIND } }, function (res) {
-        if (res && res.returnValue && res.results && res.results.length) {
-            sendCfg = normalizeConfig(res.results[0]);
-            configCache = JSON.parse(JSON.stringify(sendCfg));
+function incrementAndMaybeStop(cfg, cb) {
+    var done = cb || function () {};
+    var count = (typeof cfg.sendCount === 'number' && cfg.sendCount > 0) ? cfg.sendCount : 0;
+    count += 1;
+    cfg.sendCount = count;
+    saveConfig(cfg, function (err, saved) {
+        var max = (saved && typeof saved.sendMaxCount === 'number')
+            ? saved.sendMaxCount : DEFAULT_CONFIG.sendMaxCount;
+        if (count >= max) {
+            cancelKeepalive(done);
+        } else {
+            done();
         }
-        if (bootLoopRunning) { return; }
-        setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
-        runContinuousSendLoop(sendCfg);
-    }, 4000);
+    });
 }
 
-function runContinuousSendLoop(cfg) {
-    if (bootLoopRunning) { return; }
-    bootLoopRunning = true;
-
-    if (!(cfg.enabled && cfg.sendOnBoot)) {
-        bootLoopRunning = false;
-        return;
-    }
-
-    var intervalMs = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
-        ? cfg.sendIntervalSec * 1000 : DEFAULT_CONFIG.sendIntervalSec * 1000;
-
-    function sendOnce() {
-        sendWOLWhenNetworkReady(cfg, function (err) {
-            if (err) {
-                bootAutoState.lastWol = 'error';
-            } else {
-                bootAutoState.lastWol = 'sent';
-                recordSend(true, '');
-            }
-            setTimeout(sendOnce, intervalMs);
-        });
-    }
-    sendOnce();
+function startBootAutosend() {
+    loadConfig(function (err, cfg) {
+        configCache = JSON.parse(JSON.stringify(cfg));
+        setBootAuto(!!(cfg.enabled && cfg.sendOnBoot), function () {});
+    });
 }
 
 startBootAutosend();
@@ -527,17 +466,21 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        if (p.fromPull && !bootLoopRunning) {
-            if (cfg.enabled && cfg.sendOnBoot) { runContinuousSendLoop(cfg); }
-        }
-
-        sendMagicPacket(cfg, function (sendErr) {
+        function respond(sendErr) {
             if (sendErr) {
                 bootAutoState.lastWol = 'error';
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
                 bootAutoState.lastWol = 'sent';
                 message.respond({ returnValue: true, sent: true });
+            }
+        }
+
+        sendMagicPacket(cfg, function (sendErr) {
+            if (p.fromPull && cfg.enabled && cfg.sendOnBoot) {
+                incrementAndMaybeStop(cfg, function () { respond(sendErr); });
+            } else {
+                respond(sendErr);
             }
         });
     });
