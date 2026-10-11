@@ -66,8 +66,32 @@ function Step-Port([string]$ip, [int]$port) {
     return $false
 }
 
+# 关键：webOS TV Dev Mode 的 ares-novacom --getkey 只在 tv 这个 profile 下受支持。
+# 若 profile 被误改为 ose（模拟器）等，就会出现 "This command is not supported by current profile"。
+# 这里在脚本开头强制切回 tv profile，避免因乱改 profile 而失败。
+function Ensure-TvProfile {
+    $current = & ares-config -c 2>&1 | Out-String
+    if ($current -notmatch '\btv\b') {
+        & ares-config -p tv 2>&1 | Out-Null
+    }
+    $after = & ares-config -c 2>&1 | Out-String
+    return ($after -match '\btv\b')
+}
+
+# 依据当前生效的 profile 定位 novacom 配置（profile 目录名 = 当前 profile）。
+# 旧版脚本硬编码 tv 路径，若 profile 为 ose 会改错文件，导致修正 host 不生效。
+function Get-ActiveNovacomConfig {
+    $prof = (& ares-config -c 2>&1 | Out-String).Trim()
+    if ($prof -match 'profile set to\s+(\S+)') { $prof = $Matches[1] }
+    elseif ($prof -match '\b(ose|tv|signage|apollo)\b') { $prof = $Matches[1] }
+    else { $prof = 'tv' }
+    $cfg = Join-Path $env:APPDATA (".webos\$prof\novacom-devices.json")
+    if (-not (Test-Path $cfg)) { $cfg = Join-Path $env:APPDATA '.webos\tv\novacom-devices.json' }
+    return $cfg
+}
+
 function Patch-NovacomHost {
-    $cfg = Join-Path $env:APPDATA '.webos\tv\novacom-devices.json'
+    $cfg = Get-ActiveNovacomConfig
     if (-not (Test-Path $cfg)) { return $false }
     $json = Get-Content $cfg -Raw | ConvertFrom-Json
     $changed = $false
@@ -100,6 +124,10 @@ Say "`n[1/7] 检查 ares CLI..."
 if (Get-Command ares -ErrorAction SilentlyContinue) { Ok "ares 可用: $((ares -V) 2>&1)" ; $summary += 'OK ares' }
 else { Fail "未找到 ares。先执行: npm install -g @webos-tools/cli"; exit 1 }
 
+Say "`n[1.1/7] 确保 ares profile=tv（webOS TV Dev Mode）..."
+if (Ensure-TvProfile) { Ok "ares profile 已设为 tv（--getkey 仅 tv 支持）" ; $summary += 'OK profile' }
+else { Fail "无法将 ares profile 切到 tv，请手动执行: ares-config -p tv"; $summary += 'FAIL profile'; exit 1 }
+
 Say "`n[2/7] 检查电视连通性 $TvIp`:$TvPort ..."
 if (-not (Test-Connection -ComputerName $TvIp -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
     Fail "ping 不通 $TvIp。请确认：已断开 VPN / 电视在同一局域网。"; exit 1
@@ -113,7 +141,8 @@ else {
 $summary += 'OK 连通'
 
 Say "`n[3/7] 修正 novacom host=$TvIp ..."
-if (Patch-NovacomHost) { Ok "novacom 配置已更新 (device=$Device -> $TvIp)" ; $summary += 'OK host' }
+$activeCfg = Get-ActiveNovacomConfig
+if (Patch-NovacomHost) { Ok "novacom 配置已更新 ($activeCfg, device=$Device -> $TvIp)" ; $summary += 'OK host' }
 else { Fail "未找到 novacom 配置"; $summary += 'FAIL host'; exit 1 }
 
 Say "`n[4/7] 获取 SSH 密钥 ..."
