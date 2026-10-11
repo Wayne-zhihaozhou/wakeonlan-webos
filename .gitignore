@@ -13,6 +13,3 @@ Thumbs.db
 # 本地 Passphrase（含个人电视密钥，勿提交）
 passphrase.txt
 *.local.ps1
-
-# 运行时日志（收到/抓取的电视日志，不提交）
-logs/

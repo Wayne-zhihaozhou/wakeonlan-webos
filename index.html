@@ -60,42 +60,12 @@
             <div class="row switch-row">
                 <div class="field grow">
                     <label>开机自动发送</label>
-                    <p class="hint">电视【每次】开机/唤醒后 90 秒内循环发送魔术包（每 2 秒一次，后台无弹窗），确保电脑被唤醒。兼容「即时开机 / Quick Start+」的短待机唤醒（靠屏幕亮起信号触发，无需等待深度关机）。</p>
+                    <p class="hint">电视冷开机（彻底断电/完全关机再开机）后自动发送一次魔术包唤醒电脑。短待机/「即时开机」唤醒不自动发送。</p>
                 </div>
                 <label id="swSendOnBoot" class="switch" tabindex="0">
                     <input type="checkbox" id="sendOnBoot" checked>
                     <span class="slider"></span>
                 </label>
-            </div>
-            <div class="row">
-                <div class="field small">
-                    <label for="sendInterval">发送间隔（秒）</label>
-                    <input id="sendInterval" type="number" value="1" min="1" max="3600" readonly>
-                    <p class="hint">服务存活期间每这么多秒发一次魔术包。默认 1 秒（最快唤醒）。</p>
-                </div>
-            </div>
-        </section>
-
-        <section class="card">
-            <div class="row switch-row">
-                <div class="field grow">
-                    <label>把日志转发到电脑</label>
-                    <p class="hint">开启后，电视上服务的每一行运行日志都会通过 UDP 实时推送到局域网内电脑的指定 IP 和端口，方便在电脑上看日志（电脑需先运行 receive-log.ps1 监听）。</p>
-                </div>
-                <label id="swLogForward" class="switch" tabindex="0">
-                    <input type="checkbox" id="logForward">
-                    <span class="slider"></span>
-                </label>
-            </div>
-            <div class="row">
-                <div class="field grow">
-                    <label for="logHost">电脑 IP</label>
-                    <input id="logHost" type="text" placeholder="192.168.1.6" spellcheck="false" readonly>
-                </div>
-                <div class="field small">
-                    <label for="logPort">端口</label>
-                    <input id="logPort" type="number" value="5555" min="1" max="65535" readonly>
-                </div>
             </div>
         </section>
 
@@ -106,7 +76,7 @@
             <span id="status" class="status"></span>
         </section>
 
-        <p class="foot">按遥控器方向键在各项之间移动，按 OK 选中/确认。修改后请点击「保存」；点击「退出」或按遥控器返回键可退出应用。运行日志统一在电脑端查看：勾选「把日志转发到电脑」并用 `receive-log.ps1` 监听，或用 `ares-log` 查看。</p>
+        <p class="foot">按遥控器方向键在各项之间移动，按 OK 选中/确认。修改后请点击「保存」；点击「退出」或按遥控器返回键可退出应用。</p>
     </main>
 
     <script src="js/app.js"></script>

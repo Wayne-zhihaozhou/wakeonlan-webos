@@ -22,15 +22,10 @@
         mac: document.getElementById('mac'),
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
-        sendInterval: document.getElementById('sendInterval'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
-        logForward: document.getElementById('logForward'),
-        logHost: document.getElementById('logHost'),
-        logPort: document.getElementById('logPort'),
         swEnabled: document.getElementById('swEnabled'),
         swSendOnBoot: document.getElementById('swSendOnBoot'),
-        swLogForward: document.getElementById('swLogForward'),
         save: document.getElementById('btnSave'),
         exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
@@ -275,12 +270,8 @@
                 els.mac.value = c.mac || '';
                 els.ip.value = c.ip || '255.255.255.255';
                 els.port.value = c.port || 9;
-                els.sendInterval.value = c.sendIntervalSec || 1;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
-                els.logForward.checked = c.logForward === true;
-                els.logHost.value = c.logHost || '192.168.1.6';
-                els.logPort.value = c.logPort || 5555;
                 ensureMacDefault(); // 存的是空就回退到默认 MAC
                 rebuildDeviceList([], null);
                 setStatus('已加载设置。可点「扫描设备」选择目标。', 'ok');
@@ -290,12 +281,8 @@
                 els.mac.value = DEFAULT_MAC;
                 els.ip.value = '255.255.255.255';
                 els.port.value = 9;
-                els.sendInterval.value = 1;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
-                els.logForward.checked = false;
-                els.logHost.value = '192.168.1.6';
-                els.logPort.value = 5555;
                 rebuildDeviceList([], null);
                 setStatus('已使用默认目标（' + DEFAULT_MAC + '），可直接保存。', '');
             });
@@ -306,12 +293,8 @@
             mac: els.mac.value.trim(),
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
-            sendIntervalSec: parseInt(els.sendInterval.value, 10) || 1,
             enabled: els.enabled.checked,
-            sendOnBoot: els.sendOnBoot.checked,
-            logForward: els.logForward.checked,
-            logHost: els.logHost.value.trim(),
-            logPort: parseInt(els.logPort.value, 10) || 5555
+            sendOnBoot: els.sendOnBoot.checked
         };
     }
 
@@ -402,8 +385,7 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.sendInterval,
-            els.swLogForward, els.logHost, els.logPort,
+            els.swEnabled, els.swSendOnBoot,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -427,7 +409,6 @@
         if (!el) { return; }
         if (el === els.swEnabled) { els.enabled.checked = !els.enabled.checked; }
         else if (el === els.swSendOnBoot) { els.sendOnBoot.checked = !els.sendOnBoot.checked; }
-        else if (el === els.swLogForward) { els.logForward.checked = !els.logForward.checked; }
         else if (el.tagName === 'BUTTON') { el.click(); }
     }
 
@@ -438,12 +419,10 @@
     // 才解除 readonly，这时系统才会弹出键盘。编辑结束（失焦）后自动恢复
     // readonly，下次再聚焦不会打扰。
     function isEditableInput(el) {
-        return el && (el === els.mac || el === els.ip || el === els.port ||
-            el === els.logHost || el === els.logPort ||
-            el === els.sendInterval);
+        return el && (el === els.mac || el === els.ip || el === els.port);
     }
 
-    ['mac', 'ip', 'port', 'logHost', 'logPort', 'sendInterval'].forEach(function (key) {
+    ['mac', 'ip', 'port'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true; // 结束编辑/移开焦点后再次锁定
         });

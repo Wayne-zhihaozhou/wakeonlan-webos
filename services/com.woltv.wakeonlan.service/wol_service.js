@@ -4,19 +4,14 @@
  * Runs as a Node.js JS Service in the background on the TV.
  * - 开机自动唤醒：电视冷开机（彻底断电/完全关机再开机）后，Activity Manager 的
  *   `net` 触发器（connectionmanager/getStatus 网络从无到有）拉起本服务并调用 `wake`
- *   单次发送一次魔术包。tvpower/displayStatus/screenState 对第三方服务无 ACG 权限、
- *   无法武装，且屏幕/电源订阅与轮询看护均已移除——本服务不再持续发送，也不订阅
- *   屏幕或电源状态，短待机/Quick Start+ 唤醒不再自动发包。
+ *   单次发送一次魔术包。本服务不做持续发送，也不订阅/轮询屏幕或电源状态，
+ *   因此短待机/Quick Start+ 唤醒不会自动发包。
  * - Registers bus methods used by the front-end app:
  *     wake       -> send a magic packet now
  *     getConfig  -> return stored config
  *     setConfig  -> persist config (DB8)
  *     getStatus  -> last send result / service uptime
  *     scan       -> scan the LAN (ping sweep + ARP table) for devices
- *
- * - Every console.log line is also forwarded over UDP to a PC on the LAN
- *   (logHost:logPort) when "logForward" is enabled, so all logs are viewed
- *   on the computer (see receive-log.ps1) instead of on the TV.
  *
  * Uses only built-in Node modules (`dgram`, `os`, `fs`, `net`)
  * plus the webOS `webos-service` module, which is pre-installed on the TV.
@@ -29,28 +24,6 @@ var os = require('os');
 var fs = require('fs');
 var net = require('net');
 
-/* ------------------------------------------------------------------ *
- *  console.log wrapper (used by all log output)
- *  ------------------------------------------------------------------ *
- *  服务不把日志缓存在内存里给电视端显示（那部分已移除）；每打一行就带时间戳
- *  通过 UDP 转发到电脑（logHost:logPort），由 receive-log.ps1 接收落盘，
- *  所有日志统一在电脑端查看。转发失败/目标不在线时静默忽略，绝不影响服务。
- * ------------------------------------------------------------------ */
-var origLog = console.log;
-console.log = function () {
-    var parts = [];
-    for (var i = 0; i < arguments.length; i++) {
-        var a = arguments[i];
-        parts.push(typeof a === 'string' ? a : safeStr(a));
-    }
-    var line = '[' + new Date().toISOString() + '] ' + parts.join(' ');
-    logForwardLine(line); // 若开启日志转发，把带时间戳的行推给电脑
-    try { origLog.apply(console, arguments); } catch (e) { /* noop */ }
-};
-function safeStr(v) {
-    try { return JSON.stringify(v); } catch (e) { return String(v); }
-}
-
 var SERVICE_NAME = 'com.woltv.wakeonlan.service';
 var DB_URI = 'luna://com.palm.db';
 var KIND = 'com.woltv.wakeonlan:1';
@@ -62,14 +35,6 @@ var DEFAULT_CONFIG = {
     ip: '255.255.255.255',  // 广播地址；也可填电脑的固定 IP（单播更稳）
     port: 9,                // WoL standard port
     broadcast: true,        // set UDP broadcast flag when sending
-    // sendIntervalSec：保留字段，供前端表单存取（历史兼容），
-    // 已不再驱动任何发送——本服务不再持续发送，只做单次发送。
-    sendIntervalSec: 1,
-    // 日志转发：服务每打一行 console.log 就通过 UDP 推到局域网内电脑的
-    // logHost:logPort，方便在电脑上看日志而不是在电视上翻。默认关闭。
-    logForward: false,      // 是否把服务日志转发到电脑
-    logHost: '192.168.1.6', // 电脑 IP（同一局域网）
-    logPort: 5555           // 电脑上 UDP 监听端口（receive-log.ps1）
 };
 
 var service = new Service(SERVICE_NAME);
@@ -78,18 +43,11 @@ var lastSend = { at: 0, ok: false, error: '' };
 /* ------------------------------------------------------------------ *
  *  Boot auto-launch via the webOS Activity Manager
  *  ------------------------------------------------------------------ *
- *  On LG webOS a third-party JS service process is started *lazily*:
- *  it only runs when the owning app is launched or a bus client calls it.
- *  Nothing pulls it up at TV boot, so relying on `startBootAutosend()`
- *  alone means the PC never wakes until the user opens the app.
- *
- *  Fix: register *persistent* Activities (`luna://com.palm.activitymanager`),
- *  one per trigger source, each with a simple trigger. Persistent Activities
- *  live in DB8 and are re-armed by the Activity Manager on every boot, so the
- *  service is pulled up automatically right after the TV powers on — no app
- *  launch needed. Using several trigger sources gives redundancy so that any
- *  single source a given firmware refuses (or a boot scenario that doesn't
- *  fire it) can't block the whole wake flow.
+ *  On LG webOS a third-party JS service process is started *lazily*: it only
+ *  runs when the owning app is launched or a bus client calls it. Nothing
+ *  pulls it up at TV boot, so we register a *persistent* Activity that lives
+ *  in DB8 and is re-armed by the Activity Manager on every boot, pulling the
+ *  service up automatically after the TV powers on — no app launch needed.
  * ------------------------------------------------------------------ */
 var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
@@ -172,64 +130,8 @@ function normalizeConfig(c) {
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
         port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
-        broadcast: c ? c.broadcast !== false : true,
-        sendIntervalSec: (c && typeof c.sendIntervalSec === 'number' && c.sendIntervalSec >= 1)
-            ? c.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec,
-        logForward: c ? c.logForward !== false : false,
-        logHost: (c && c.logHost) || DEFAULT_CONFIG.logHost,
-        logPort: (c && typeof c.logPort === 'number') ? c.logPort : DEFAULT_CONFIG.logPort
+        broadcast: c ? c.broadcast !== false : true
     };
-}
-
-/* ------------------------------------------------------------------ *
- *  UDP log forwarding to a PC on the LAN
- *  ------------------------------------------------------------------ *
- *  服务每次 console.log 都会走上面的包装器，这里再把同一行通过 UDP 推给
- *  局域网内的电脑（logHost:logPort），方便在电脑上实时看日志。默认关闭；
- *  开启后 fire-and-forget 发送，网络异常/目标不在线都静默忽略，绝不影响
- *  服务本身。datagram 最大约 64KB，而我们的单行已限长 2000 字符，安全。
- * ------------------------------------------------------------------ */
-var LOG_FWD_SOCKET_TIMEOUT_MS = 120000; // 空闲多久后关闭 UDP socket
-var logFwdSocket = null;
-var logFwdTimer = null;
-
-function closeLogFwdSocket() {
-    if (logFwdTimer) { clearTimeout(logFwdTimer); logFwdTimer = null; }
-    if (logFwdSocket) {
-        try { logFwdSocket.close(); } catch (e) { /* noop */ }
-        logFwdSocket = null;
-    }
-}
-
-function ensureLogFwdSocket() {
-    if (logFwdSocket) { return logFwdSocket; }
-    try {
-        logFwdSocket = dgram.createSocket('udp4');
-        logFwdSocket.on('error', function () { closeLogFwdSocket(); });
-    } catch (e) {
-        logFwdSocket = null;
-    }
-    return logFwdSocket;
-}
-
-function logForwardLine(line) {
-    // 从当前缓存配置读取开关与目标；DB 未加载时退回默认（默认关闭）。
-    var c = configCache || DEFAULT_CONFIG;
-    if (!c || !c.logForward || !c.logHost) { return; }
-    var sock = ensureLogFwdSocket();
-    if (!sock) { return; }
-    var port = (typeof c.logPort === 'number' && c.logPort > 0)
-        ? c.logPort : DEFAULT_CONFIG.logPort;
-    var buf = Buffer.from(String(line), 'utf8');
-    if (buf.length === 0) { return; }
-    try {
-        sock.send(buf, 0, buf.length, port, c.logHost, function () {
-            // 空闲一段时间后关掉 socket，避免服务长期持有不必要的资源；
-            // 下一条日志需要时再惰性重建。
-            if (logFwdTimer) { clearTimeout(logFwdTimer); }
-            logFwdTimer = setTimeout(closeLogFwdSocket, LOG_FWD_SOCKET_TIMEOUT_MS);
-        });
-    } catch (e) { /* 静默：日志转发失败不影响服务 */ }
 }
 
 function loadConfig(cb) {
@@ -255,11 +157,6 @@ function saveConfig(cfg, cb) {
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
         obj.broadcast = cfg.broadcast !== false;
-        obj.sendIntervalSec = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
-            ? cfg.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
-        obj.logForward = cfg.logForward !== false;
-        obj.logHost = (cfg.logHost || DEFAULT_CONFIG.logHost).toString();
-        obj.logPort = typeof cfg.logPort === 'number' ? cfg.logPort : DEFAULT_CONFIG.logPort;
 
         // Update in-memory cache immediately so the app is consistent.
         configCache = normalizeConfig(obj);
@@ -277,8 +174,6 @@ function saveConfig(cfg, cb) {
                             } else {
                                 // DB genuinely failed; still report success so the
                                 // UI isn't stuck (config kept in memory for session).
-                                console.log('wol: DB persist failed (using memory): ' +
-                                    (res2 && (res2.errorText || res2.error) || 'unknown'));
                                 cb(null, configCache);
                             }
                         });
@@ -293,16 +188,11 @@ function saveConfig(cfg, cb) {
 /* ------------------------------------------------------------------ *
  *  Boot auto-launch management (Activity Manager)
  *  ------------------------------------------------------------------ *
- *  Arming creates (or replaces) one persistent, background Activity per
- *  trigger source in BOOT_TRIGGERS. Each Activity's trigger fires when the
- *  TV powers on / screen comes up and its callback invokes our `wake`
- *  method. Because the Activities are persistent, the Activity Manager
- *  re-arms them on every TV boot, so our service gets pulled up and starts
- *  the 90-second boot send loop — no app launch needed.
- *
- *  Multiple trigger sources give redundancy: any one that fires wakes the
- *  PC, so a single source that a given firmware refuses (or that doesn't
- *  fire in a particular boot scenario) can no longer block the whole flow.
+ *  Arming creates (or replaces) a persistent, background Activity for the
+ *  `net` trigger in BOOT_TRIGGERS. Its trigger fires when the TV powers on
+ *  (network comes up after cold boot) and the callback invokes our `wake`
+ *  method. Because the Activity is persistent, the Activity Manager re-arms
+ *  it on every TV boot, so the service gets pulled up automatically.
  * ------------------------------------------------------------------ */
 function setBootAuto(enabled, cb) {
     var done = cb || function () {};
@@ -313,7 +203,6 @@ function setBootAuto(enabled, cb) {
         function finishCancel() {
             bootAutoState.armed = false;
             bootAutoState.error = '';
-            console.log('wol: boot auto-launch disabled');
             done(null);
         }
         if (pendingCancels === 0) { finishCancel(); return; }
@@ -335,19 +224,7 @@ function setBootAuto(enabled, cb) {
         if (remaining > 0) { return; }
         bootAutoState.armed = anyArmed;
         bootAutoState.error = anyArmed ? '' : (lastError || 'all triggers failed');
-        console.log('wol: boot auto-launch ' +
-            (anyArmed ? 'ARMED (triggers ' + (BOOT_TRIGGERS.length - countFailed()) + '/' + BOOT_TRIGGERS.length + ')' :
-                        'FAILED (all: ' + bootAutoState.error + ')'));
         done(anyArmed ? null : new Error(bootAutoState.error));
-    }
-
-    function countFailed() {
-        var n = 0;
-        for (var i = 0; i < BOOT_TRIGGERS.length; i++) {
-            var t = bootAutoState.triggers[BOOT_TRIGGERS[i].key];
-            if (t && !t.armed) { n++; }
-        }
-        return n;
     }
 
     BOOT_TRIGGERS.forEach(function (trg) {
@@ -369,9 +246,6 @@ function setBootAuto(enabled, cb) {
                 error: ok ? '' : ((res && (res.errorText || res.error)) || 'activity create failed')
             };
             if (ok) { anyArmed = true; } else { lastError = bootAutoState.triggers[trg.key].error; }
-            console.log('wol: trigger[' + trg.key + '] ' +
-                (ok ? 'ARMED' : 'FAILED (' + bootAutoState.triggers[trg.key].error + ')') +
-                ' via ' + trg.method);
             remaining--;
             maybeFinish();
         }, 6000);
@@ -590,8 +464,6 @@ function sendWOLWhenNetworkReady(cfg, cb) {
 
     function checkAndSend() {
         if (Date.now() > deadline) {
-            console.log('wol: network not ready within ' + (NET_CHECK_TIMEOUT_MS / 60000) +
-                ' min; skip this send');
             finish(new Error('network not ready within 5 minutes'));
             return;
         }
@@ -600,8 +472,6 @@ function sendWOLWhenNetworkReady(cfg, cb) {
             if (ok) {
                 sendWOL(cfg, function (err) { finish(err); });
             } else {
-                console.log('wol: no network yet; re-check in ' +
-                    (NET_CHECK_INTERVAL_MS / 1000) + 's');
                 setTimeout(checkAndSend, NET_CHECK_INTERVAL_MS);
             }
         });
@@ -631,7 +501,6 @@ function sendWOL(cfg, cb) {
     }
 
     socket.on('error', function (err) {
-        console.log('wol: socket error: ' + err);
         finish(err);
     });
 
@@ -642,10 +511,8 @@ function sendWOL(cfg, cb) {
             }
             socket.send(packet, 0, packet.length, port, host, function (err) {
                 if (err) {
-                    console.log('wol: send error: ' + err);
                     finish(err);
                 } else {
-                    console.log('wol: magic packet sent to ' + host + ':' + port + ' for ' + cfg.mac);
                     finish(null);
                 }
             });
@@ -681,28 +548,18 @@ function startBootAutosend() {
     var sendCfg = configCache ? JSON.parse(JSON.stringify(configCache))
                               : JSON.parse(JSON.stringify(DEFAULT_CONFIG));
 
-    try {
-        dbCall('find', { query: { from: KIND } }, function (res) {
-            if (res && res.returnValue && res.results && res.results.length) {
-                sendCfg = normalizeConfig(res.results[0]);
-                configCache = JSON.parse(JSON.stringify(sendCfg));
-            }
-            // 按配置武装（或取消）开机触发器 Activity。
-            // (replace:true makes this idempotent, and it self-heals if lost.)
-            setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
-        }, 4000);
-    } catch (e) {
-        // 读配置失败：用内存/默认配置武装触发器。
+    dbCall('find', { query: { from: KIND } }, function (res) {
+        if (res && res.returnValue && res.results && res.results.length) {
+            sendCfg = normalizeConfig(res.results[0]);
+            configCache = JSON.parse(JSON.stringify(sendCfg));
+        }
+        // 按配置武装（或取消）开机触发器 Activity。
+        // (replace:true makes this idempotent, and it self-heals if lost.)
         setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
-    }
+    }, 4000);
 }
 
-try {
-    startBootAutosend();
-} catch (e) {
-    console.log('wol: startup error: ' + e);
-}
-
+startBootAutosend();
 
 /* ------------------------------------------------------------------ *
  *  Bus methods used by the front-end app
@@ -724,8 +581,6 @@ service.register('wake', function (message) {
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
                 bootAutoState.lastWol = 'sent';
-                var src = p.fromBoot ? ' (fromBoot)' : '';
-                console.log('wol: wake sent -> ' + cfg.mac + src);
                 message.respond({ returnValue: true, sent: true });
             }
         });
@@ -751,10 +606,8 @@ service.register('setConfig', function (message) {
         }
         saveConfig(p, function (saveErr, saved) {
             if (saveErr) {
-                console.log('wol: setConfig error: ' + (saveErr.errorText || saveErr));
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
-                console.log('wol: config saved: mac=' + saved.mac + ' ip=' + saved.ip + ' port=' + saved.port);
                 // 让 UI 看到本次保存后真实的开机自启结果：等 setBootAuto 完成后再响应，
                 // 否则界面会显示上一次（可能是旧的失败）状态。
                 setBootAuto(!!(saved.enabled && saved.sendOnBoot), function () {
@@ -763,7 +616,6 @@ service.register('setConfig', function (message) {
             }
         });
     } catch (e) {
-        console.log('wol: setConfig exception: ' + e);
         message.respond({ returnValue: false, errorText: String(e && e.message || e) });
     }
 });
@@ -797,5 +649,3 @@ service.register('scan', function (message) {
         }
     });
 });
-
-console.log('wol: service ' + SERVICE_NAME + ' registered');
