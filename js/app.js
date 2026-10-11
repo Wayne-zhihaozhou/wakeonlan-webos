@@ -337,6 +337,16 @@
         return '；上次开机唤醒：' + (m[ba.lastWol] || ba.lastWol);
     }
 
+    // 诊断辅助：显示电视当前电源状态与「待机→开机」检测次数。
+    // 若短待机（快速启动/即时开机）期间 powerState 根本不变化，lastPowerState
+    // 会一直停在 Active，说明只能靠关闭电视的「即时开机」让每次开机都走完整启动。
+    function powerTxt(ba) {
+        if (!ba || !ba.lastPowerState) { return ''; }
+        var s = '；电视电源=' + ba.lastPowerState;
+        if (ba.resumeFires > 0) { s += '，已检测 ' + ba.resumeFires + ' 次待机唤醒'; }
+        return s;
+    }
+
     function saveConfig() {
         var cfg = readForm();
         if (!validMac(cfg.mac)) {
@@ -347,7 +357,7 @@
         callService('setConfig', cfg)
             .then(function (res) {
                 setStatus('已保存 ✓' + bootAutoTxt(res && res.bootAuto) +
-            lastWolTxt(res && res.bootAuto), 'ok');
+            lastWolTxt(res && res.bootAuto) + powerTxt(res && res.bootAuto), 'ok');
             })
             .catch(showError);
     }
@@ -514,7 +524,8 @@
         .then(function (res) {
             setStatus('后台服务正常' +
                 bootAutoTxt(res && res.bootAuto) +
-                lastWolTxt(res && res.bootAuto) + '。', 'ok');
+                lastWolTxt(res && res.bootAuto) +
+                powerTxt(res && res.bootAuto) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');

@@ -87,10 +87,93 @@ var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
 // lastWol: 最近一次开机唤醒的结果，用于在 UI 状态栏显示——
 // none=服务启动后还未发过包；sent=已发出魔术包；error=发送失败；done=90 秒窗口已结束。
-var bootAutoState = { armed: false, error: '', lastWol: 'none' };
+var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: '', resumeFires: 0 };
 // 单个简单触发器：tvpower/powerState 电源状态变化即 fire（电视开机瞬间触发，
 // 最贴合「遥控器待机开电视」的实际用法）。不做任何网络/电源检测。
 var BOOT_TRIGGER_METHOD = 'luna://com.webos.service.tvpower/powerState';
+
+/* ------------------------------------------------------------------ *
+ *  Direct powerState watch（待机唤醒兜底 + 诊断）
+ *  ------------------------------------------------------------------ *
+ *  AM 触发器只在「powerState 发生变化且 Activity Manager 能收到该变化」时 fire。
+ *  真机现象（用户 2026 实测）：遥控器关电视后**短时间内**再开机 → 不触发；
+ *  关电视 30 分钟（彻底断电/深度待机）再开机 → 进主页面即触发。
+ *  高度怀疑：开启「即时开机 / Quick Start+ / 快速启动」时，短待机期间系统
+ *  不彻底断电，powerState 可能根本没有 Standby→Active 的变化（或变化太快
+ *  AM 没收到），于是基于「变化」的触发器永远等不到，电脑就不会被唤醒。
+ *
+ *  这里的**服务内直连订阅**只要服务进程还活着就一直盯着 powerState：
+ *  - 若短待机唤醒瞬间确实发生了 Standby/Suspend/Screen Off→Active 的边沿，
+ *    即便 AM 触发器漏了，这里也能抓到并走同样的开机发送入口；
+ *  - 无论如何，每次 powerState 变化都会打日志（转发到电脑）并写进
+ *    bootAutoState.lastPowerState，供 UI/日志判断「短待机时 powerState
+ *    到底变不变」，从而确认根因到底是哪一类。
+ * ------------------------------------------------------------------ */
+var powerWatch = {
+    active: false,     // 订阅是否已建立
+    sub: null,         // webos-service 订阅句柄
+    last: null,        // 最近一次看到的 powerState 值
+    lastAt: 0,         // 最近一次变化的毫秒时间戳
+    resumeFires: 0     // 检测到的「非开机→开机」边沿次数
+};
+
+function isActivePowerState(s) {
+    return String(s || '').toLowerCase() === 'active';
+}
+
+function handlePowerStateMessage(message) {
+    var payload = (message && message.payload) || {};
+    if (payload.returnValue === false) {
+        console.log('wol: powerState subscribe error: ' +
+            (payload.errorText || payload.error || 'unknown'));
+        return;
+    }
+    var state = payload.powerState;
+    if (!state) { return; }
+    var prev = powerWatch.last;
+    var now = Date.now();
+    powerWatch.last = state;
+    powerWatch.lastAt = now;
+    bootAutoState.lastPowerState = state;
+
+    if (prev && prev !== state) {
+        console.log('wol: powerState ' + prev + ' -> ' + state);
+        if (isActivePowerState(state) && !isActivePowerState(prev)) {
+            powerWatch.resumeFires++;
+            bootAutoState.resumeFires = powerWatch.resumeFires;
+            console.log('wol: TV resume detected (' + prev + ' -> ' + state +
+                '); starting boot send loop');
+            // 与 AM 触发器走同一个入口；内部 bootLoopRunning 防抖保证不重复。
+            try { startBootAutosend(); } catch (e) {
+                console.log('wol: resume boot send error: ' + e);
+            }
+        }
+    } else {
+        console.log('wol: powerState = ' + state +
+            (prev ? ' (unchanged)' : ' (initial, no send)'));
+    }
+}
+
+function startPowerWatch() {
+    if (powerWatch.active) { return; }
+    powerWatch.active = true;
+    try {
+        if (typeof service.subscribe === 'function') {
+            powerWatch.sub = service.subscribe(
+                'luna://com.webos.service.tvpower/powerState',
+                { subscribe: true },
+                handlePowerStateMessage
+            );
+            console.log('wol: powerState watch subscribed (warm-resume fallback + diag)');
+        } else {
+            powerWatch.active = false;
+            console.log('wol: service.subscribe unavailable; powerState watch disabled');
+        }
+    } catch (e) {
+        powerWatch.active = false;
+        console.log('wol: powerState watch start error: ' + e);
+    }
+}
 
 /* ------------------------------------------------------------------ *
  *  Config store
@@ -613,6 +696,14 @@ try {
     startBootAutosend();
 } catch (e) {
     console.log('wol: startup error: ' + e);
+}
+
+// 服务内直连订阅 tvpower/powerState：服务进程存活期间即使 AM 触发器漏掉
+// 待机唤醒的边沿，这里也能补上；同时为「短待机不触发」问题提供诊断数据。
+try {
+    startPowerWatch();
+} catch (e) {
+    console.log('wol: powerState watch startup error: ' + e);
 }
 
 /* ------------------------------------------------------------------ *
