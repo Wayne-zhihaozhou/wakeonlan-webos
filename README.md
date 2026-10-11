@@ -133,11 +133,15 @@ ares-log --device <设备名> com.woltv.wakeonlan.service
   应用也仍可手动唤醒（点「立即唤醒」）。
 - **⚠ 短待机（快速启动）可能不触发**：若电视开启了「即时开机 / Quick Start+ / 快速启动」，
   遥控器关电视后**短时间内**再开机属于浅待机唤醒，`powerState` 可能没有变化，基于「变化」的
-  触发器不会 fire，电脑不会醒（长待机/彻底断电后再开机则正常）。两个应对：
+  触发器不会 fire，电脑不会醒（长待机/彻底断电后再开机则正常）。且真机实测：
+  `tvpower/powerState`、`displayStatus` 两个触发器被固件 ACG **拒绝订阅**（第三方无权），
+  仅 `connectionmanager/getStatus` 生效——而它在待机唤醒场景又因网络无变化而不 fire。
+  因此**服务常驻 + powerState 直连订阅**是待机唤醒的主要指望：
   1. **推荐**：电视设置里关闭「即时开机/快速启动」，让每次开机都是完整启动（代价：开机慢几秒）；
-  2. 应用侧已加**服务内 powerState 直连订阅**兜底：服务进程存活期间能抓到待机唤醒边沿时
-     会直接触发发送；UI 状态栏的「电视电源=…，已检测 N 次待机唤醒」可用于判断。
-  详见 `HANDOVER_WOL_BOOT_AUTOSTART.md` 第 2.5 节。
+  2. 应用侧已加**服务常驻（adopt 常驻 Activity）+ 服务内 powerState 直连订阅**兜底：服务被拉起后
+     保持进程存活并直连订阅 powerState，待机唤醒时若能抓到 Standby→Active 边沿就触发发送；
+     UI 状态栏的「电视电源=…，已检测 N 次待机唤醒」可用于判断。
+  详见 `HANDOVER_WOL_BOOT_AUTOSTART.md` 第 11/12 节。
 
 ## 把电视日志实时推送到电脑（局域网内看日志）
 

@@ -336,3 +336,55 @@ UI 状态栏显示「开机自启已启用 ✓（触发源 X/3：tvpower/net/…
    （`lastPowerState` / `resumeFires`），不影响多触发源 Activity。
 4. **真机复测步骤**：重新部署 → 打开应用保存一次（确认状态栏「触发源 X/3」）→ 分别测
    「遥控器待机→开机」「彻底断电→开机」，看电脑是否被唤醒，以及 `ares-log` 里哪个 `trigger[xxx]` 触发。
+
+---
+
+## 12. 方向 1：服务常驻 + powerState 直连订阅（绕开 AM 对 tvpower 的 ACG 限制）
+
+### 真机日志发现（关键根因）
+
+重新部署后 `ares-log` 显示三个触发源的武装结果：
+
+```
+wol: trigger[tvpower] FAILED ('com.woltv.wakeonlan.service' doesn't have rights to call callback/trigger) via tvpower/powerState
+wol: trigger[display] FAILED ('com.woltv.wakeonlan.service' doesn't have rights to call callback/trigger) via systemservice/displayStatus
+wol: trigger[net]      ARMED via connectionmanager/getStatus
+wol: boot auto-launch ARMED (1/3 triggers)
+```
+
+- `tvpower/powerState` 和 `displayStatus` —— 最能反映「屏幕亮起/待机唤醒」的触发源，被**固件 ACG 权限拒绝**
+  （第三方 Activity 无权订阅），只能 FAILED。
+- 唯一成功的 `net`（connectionmanager/getStatus）在**「遥控器待机→开机」场景不会 fire**（待机期间
+  网络一直连着、无状态变化，webOS 触发器只在「变化」时触发）。
+
+**结论**：Activity Manager 触发器这条路，在「待机唤醒」场景被固件权限卡死——能覆盖待机唤醒的
+tvpower 被拒，能用的 net 又不覆盖待机场景。
+
+### 方案（已实现，待真机复测）
+
+绕开「AM 代第三方订阅 tvpower」的权限限制，改用**服务进程自己直连订阅** tvpower/powerState，
+并让服务**常驻**以持续监听：
+
+1. `startPowerWatch()`（原有）：服务进程用 `service.subscribe` 直连订阅 `tvpower/powerState`。
+   只要进程存活，powerState 一变（含 Standby→Active 边沿）就抓得到并触发发送。订阅方是服务自身
+   （`com.woltv.wakeonlan.service`），**不受 AM 的 ACG 限制**。
+2. `startKeepAlive()`（新增）：服务被拉起后，`create` 一个无触发器、`start:true` 的持久化后台
+   Activity（`com.woltv.wakeonlan.bootwol.keepalive`），再用 `adopt` 让它成为该 Activity 的 parent，
+   **使服务进程被 Activity Manager 持续持有而不退出**，从而 powerWatch 能一直监听。
+3. 90 秒发送窗口结束后进程不退出（keepalive 持有），之后任意一次待机唤醒，powerState 边沿被
+   powerWatch 抓到 → 重新走 `startBootAutosend` 发包。
+
+**已知风险（用户已接受）**：若电视待机时系统仍会强杀第三方后台服务进程，则 keepalive 失效、
+常驻不成立，方向 1 无法解决待机唤醒。这必须真机验证（看待机后 `receive-log.ps1` 是否还能收到日志）。
+
+### 关闭自启
+
+`setBootAuto(false)` 现在会一并取消所有触发源 Activity + keepalive Activity。
+
+### 真机验证要点
+
+1. 部署后 `ares-log` 应见 `wol: keepalive adopt OK (service resident)`（或 `keepalive create FAILED`）。
+2. 电视进入待机后，电脑端 `receive-log.ps1` 应仍能收到电视日志（说明服务常驻、没被杀）。
+3. 按遥控器待机→开机，看是否出现 `wol: TV resume detected (... -> Active); starting boot send loop`
+   并随之 `wol: magic packet sent`，且电脑被唤醒。
+4. 若待机后日志断了 → 服务被系统杀掉，方向 1 无效，需换思路（寻找待机唤醒时会变化且第三方可订阅的服务方法）。

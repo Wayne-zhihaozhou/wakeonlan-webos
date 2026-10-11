@@ -132,6 +132,13 @@ var BOOT_TRIGGERS = [
     }
 ];
 
+// 常驻 Activity：让服务进程被 Activity Manager 持续持有而不退出。
+// 方向 1 的核心——服务被 net 触发器拉起后，通过 adopt 这个无触发器、start:true
+// 的持久化后台 Activity 成为其 parent，从而保持进程常驻；进程存活期间
+// startPowerWatch 直连订阅的 tvpower/powerState 一直监听，待机唤醒时能抓到
+// Standby→Active 边沿并触发发送（绕开 AM 触发器对 tvpower 的 ACG 限制）。
+var KEEPALIVE_ACTIVITY_NAME = BOOT_ACTIVITY_NAME + '.keepalive';
+
 /* ------------------------------------------------------------------ *
  *  Direct powerState watch（待机唤醒兜底 + 诊断）
  *  ------------------------------------------------------------------ *
@@ -212,6 +219,50 @@ function startPowerWatch() {
     } catch (e) {
         powerWatch.active = false;
         console.log('wol: powerState watch start error: ' + e);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Keep-alive（服务常驻）—— 方向 1
+ *  ------------------------------------------------------------------ *
+ *  让服务进程被 Activity Manager 持续持有而不退出，从而 startPowerWatch 的
+ *  powerState 直连订阅能一直监听，待机唤醒时抓得到边沿。
+ *  做法：create 一个无触发器、start:true 的持久化后台 Activity，然后 adopt 它，
+ *  使本服务进程成为该 Activity 的 parent（Activity 存活期间 parent 进程被持有）。
+ * ------------------------------------------------------------------ */
+var keepAliveStarted = false;
+function startKeepAlive() {
+    if (keepAliveStarted) { return; }
+    keepAliveStarted = true;
+    try {
+        lunaCall(AM_URI, 'create', {
+            activity: {
+                name: KEEPALIVE_ACTIVITY_NAME,
+                description: 'Keep WOL service resident to watch powerState for warm-resume wake',
+                type: { background: true, persist: true }
+            },
+            replace: true,
+            start: true,
+            subscribe: true
+        }, function (res) {
+            var aid = res && res.activityId;
+            if (res && res.returnValue && aid) {
+                // Adopt it so the service process becomes the Activity parent and stays resident.
+                lunaCall(AM_URI, 'adopt', {
+                    activityId: aid,
+                    wait: false,
+                    subscribe: true
+                }, function (res2) {
+                    console.log('wol: keepalive adopt ' +
+                        ((res2 && res2.returnValue) ? 'OK (service resident)' : 'FAILED (' + (res2 && (res2.errorText || res2.error)) + ')'));
+                }, 6000);
+            } else {
+                console.log('wol: keepalive create ' +
+                    ((res && res.returnValue) ? 'created' : 'FAILED (' + (res && (res.errorText || res.error)) + ')'));
+            }
+        }, 6000);
+    } catch (e) {
+        console.log('wol: keepalive start error: ' + e);
     }
 }
 
@@ -400,8 +451,10 @@ function saveConfig(cfg, cb) {
 function setBootAuto(enabled, cb) {
     var done = cb || function () {};
     if (!enabled) {
-        // 取消所有触发源对应的 Activity。
-        var pendingCancels = BOOT_TRIGGERS.length;
+        // 取消所有触发源对应的 Activity + 常驻 Activity。
+        var cancelNames = BOOT_TRIGGERS.map(function (t) { return t.name; });
+        cancelNames.push(KEEPALIVE_ACTIVITY_NAME);
+        var pendingCancels = cancelNames.length;
         function finishCancel() {
             bootAutoState.armed = false;
             bootAutoState.error = '';
@@ -409,10 +462,9 @@ function setBootAuto(enabled, cb) {
             done(null);
         }
         if (pendingCancels === 0) { finishCancel(); return; }
-        BOOT_TRIGGERS.forEach(function (trg) {
-            lunaCall(AM_URI, 'cancel', { name: trg.name }, function () {
+        cancelNames.forEach(function (name) {
+            lunaCall(AM_URI, 'cancel', { name: name }, function () {
                 // A "not found" is fine here (already disabled).
-                bootAutoState.triggers[trg.key] = { armed: false };
                 if (--pendingCancels <= 0) { finishCancel(); }
             }, 6000);
         });
@@ -789,6 +841,14 @@ try {
     startPowerWatch();
 } catch (e) {
     console.log('wol: powerState watch startup error: ' + e);
+}
+
+// 方向 1：adopt 常驻 Activity 让服务进程保持存活，确保上面 powerState 直连
+// 订阅能持续监听（电视待机/唤醒时都能收到），从而待机唤醒也能抓到边沿发包。
+try {
+    startKeepAlive();
+} catch (e) {
+    console.log('wol: keepalive startup error: ' + e);
 }
 
 /* ------------------------------------------------------------------ *
