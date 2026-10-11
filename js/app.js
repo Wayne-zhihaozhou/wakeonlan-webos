@@ -346,23 +346,11 @@
     function lastWolTxt(ba) {
         if (!ba || !ba.armed) { return ''; }
         var m = {
-            sent: '持续发送中 ✓',
+            sent: '已发送 ✓',
             error: '发送失败',
             none: '尚未发送'
         };
         return '；发送状态：' + (m[ba.lastWol] || ba.lastWol);
-    }
-
-    // 诊断辅助：显示电视当前电源状态、检测到的「待机→开机」与「屏幕灭→亮」次数。
-    // 若短待机（快速启动/即时开机）期间 powerState 根本不变化，lastPowerState 会一直
-    // 停在 Active，此时应靠屏幕亮起边沿（screenOnFires）触发——这正修复了短待机不触发。
-    function powerTxt(ba) {
-        if (!ba) { return ''; }
-        var s = '';
-        if (ba.lastPowerState) { s += '；电视电源=' + ba.lastPowerState; }
-        if (ba.resumeFires > 0) { s += '，待机唤醒 ' + ba.resumeFires + ' 次'; }
-        if (ba.screenOnFires > 0) { s += '，屏幕亮起 ' + ba.screenOnFires + ' 次'; }
-        return s;
     }
 
     function saveConfig() {
@@ -375,7 +363,7 @@
         callService('setConfig', cfg)
             .then(function (res) {
                 setStatus('已保存 ✓' + bootAutoTxt(res && res.bootAuto) +
-            lastWolTxt(res && res.bootAuto) + powerTxt(res && res.bootAuto), 'ok');
+            lastWolTxt(res && res.bootAuto), 'ok');
             })
             .catch(showError);
     }
@@ -544,8 +532,7 @@
         .then(function (res) {
             setStatus('后台服务正常' +
                 bootAutoTxt(res && res.bootAuto) +
-                lastWolTxt(res && res.bootAuto) +
-                powerTxt(res && res.bootAuto) + '。', 'ok');
+                lastWolTxt(res && res.bootAuto) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');
