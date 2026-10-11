@@ -69,11 +69,47 @@
             </div>
         </section>
 
+        <section class="card">
+            <div class="row switch-row">
+                <div class="field grow">
+                    <label>把日志转发到电脑</label>
+                    <p class="hint">开启后，电视上服务的每一行运行日志都会通过 UDP 实时推送到局域网内电脑的指定 IP 和端口，方便在电脑上看日志（电脑需先运行 receive-log.ps1 监听）。</p>
+                </div>
+                <label id="swLogForward" class="switch" tabindex="0">
+                    <input type="checkbox" id="logForward">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="row">
+                <div class="field grow">
+                    <label for="logHost">电脑 IP</label>
+                    <input id="logHost" type="text" placeholder="192.168.1.6" spellcheck="false" readonly>
+                </div>
+                <div class="field small">
+                    <label for="logPort">端口</label>
+                    <input id="logPort" type="number" value="5555" min="1" max="65535" readonly>
+                </div>
+            </div>
+        </section>
+
         <section class="card actions">
             <button id="btnSave" class="btn">保存</button>
             <button id="btnExit" class="btn">退出</button>
             <button id="btnWake" class="btn">立即唤醒（测试）</button>
+            <button id="btnLog" class="btn">查看日志</button>
             <span id="status" class="status"></span>
+        </section>
+
+        <section class="card log-card" id="logCard" hidden>
+            <div class="row log-head">
+                <h2>服务日志（电视端）</h2>
+                <span class="log-meta" id="logMeta"></span>
+                <button id="btnLogRefresh" class="btn">刷新</button>
+                <button id="btnLogClear" class="btn">清空</button>
+                <button id="btnLogClose" class="btn">关闭</button>
+            </div>
+            <pre id="logView" class="log-view" tabindex="0">（打开「查看日志」后加载…）</pre>
+            <p class="hint">日志以无限高度展示并随整页滚动：用鼠标滚轮或遥控器上/下键滚动整页查看，左/右 在「刷新 / 关闭」间移动，OK 确认，返回键 关闭日志面板。日志来自电视上服务进程的内存缓存（最近 400 行）。</p>
         </section>
 
         <p class="foot">按遥控器方向键在各项之间移动，按 OK 选中/确认。修改后请点击「保存」；点击「退出」或按遥控器返回键可退出应用。</p>

@@ -25,6 +25,81 @@ var os = require('os');
 var fs = require('fs');
 var net = require('net');
 
+/* ------------------------------------------------------------------ *
+ *  In-app log ring buffer
+ *  ------------------------------------------------------------------ *
+ *  webOS 电视上不方便查看电脑端的日志文件，所以把服务自身的运行日志缓存
+ *  在内存里，通过 getLog 总线方法暴露，前端应用可随时拉取并显示在电视屏
+ *  幕上——排障时直接在电视上看，不必再 ssh / ares-log 去抓文件。
+ * ------------------------------------------------------------------ */
+var LOG_MAX = 400;        // 最多保留最近 400 行
+var LOG_LINE_MAX = 2000;  // 单行最长 2000 字符，避免单条超长 JSON 撑爆 getLog 总线响应
+var LOG_FILE = '/tmp/wol_service.log';    // 日志持久化文件
+var START_FILE = '/tmp/wol_service_start'; // 最早启动时间标记文件
+var logLines = [];
+
+// webOS 的 JS 服务进程是按需拉起、空闲时可能被系统回收重启的。若日志只放内存，
+// 一旦服务进程被重启（应用/电视本身都没重启也一样），日志会被清成只剩注册那一
+// 行、运行时间归 0——这正是之前看到的“1 行 / 0 秒”。这里把日志行和最早启动时间
+// 持久化到 /tmp：
+//   - 仅服务进程重启时，日志与运行时间都能续上，不再出现“1 行 / 0 秒”；
+//   - 电视重启后 /tmp 会被清空，日志重新从 0 开始（属预期）。
+function readLogFromFile() {
+    try {
+        var arr = String(fs.readFileSync(LOG_FILE, 'utf8')).split('\n');
+        var out = [];
+        for (var i = 0; i < arr.length; i++) { if (arr[i]) { out.push(arr[i]); } }
+        if (out.length > LOG_MAX) { out = out.slice(out.length - LOG_MAX); }
+        return out;
+    } catch (e) { return []; }
+}
+function appendLogToFile(line) {
+    try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) { /* 写不进就退回纯内存 */ }
+}
+function rewriteLogFile() {
+    try {
+        fs.writeFileSync(LOG_FILE, logLines.join('\n') + (logLines.length ? '\n' : ''));
+    } catch (e) { /* noop */ }
+}
+logLines = readLogFromFile();
+
+function initStartedAt() {
+    try {
+        var t = parseInt(String(fs.readFileSync(START_FILE, 'utf8')).trim(), 10);
+        if (t && t > 0) { return t; }
+    } catch (e) { /* 首次运行或文件不可读 */ }
+    var now = Date.now();
+    try { fs.writeFileSync(START_FILE, String(now)); } catch (e) { /* noop */ }
+    return now;
+}
+var startedAt = initStartedAt();
+
+var origLog = console.log;
+console.log = function () {
+    var parts = [];
+    for (var i = 0; i < arguments.length; i++) {
+        var a = arguments[i];
+        parts.push(typeof a === 'string' ? a : safeStr(a));
+    }
+    var line = '[' + new Date().toISOString() + '] ' + parts.join(' ');
+    if (line.length > LOG_LINE_MAX) {
+        line = line.slice(0, LOG_LINE_MAX) + ' …(此行过长已截断)';
+    }
+    logLines.push(line);
+    var trimmed = false;
+    if (logLines.length > LOG_MAX) {
+        logLines.splice(0, logLines.length - LOG_MAX);
+        trimmed = true;
+    }
+    appendLogToFile(line);
+    if (trimmed) { rewriteLogFile(); } // 裁剪内存缓冲时同步重写文件，避免文件无限增长
+    logForwardLine(line); // 若开启日志转发，把带时间戳的行推给电脑
+    try { origLog.apply(console, arguments); } catch (e) { /* noop */ }
+};
+function safeStr(v) {
+    try { return JSON.stringify(v); } catch (e) { return String(v); }
+}
+
 var SERVICE_NAME = 'com.woltv.wakeonlan.service';
 var DB_URI = 'luna://com.palm.db';
 var KIND = 'com.woltv.wakeonlan:1';
@@ -35,11 +110,15 @@ var DEFAULT_CONFIG = {
     mac: 'CC:28:AA:A7:B4:1F', // 目标电脑有线网卡 MAC（默认值，装完即用）
     ip: '255.255.255.255',  // 广播地址；也可填电脑的固定 IP（单播更稳）
     port: 9,                // WoL standard port
-    broadcast: true         // set UDP broadcast flag when sending
+    broadcast: true,        // set UDP broadcast flag when sending
+    // 日志转发：服务每打一行 console.log 就通过 UDP 推到局域网内电脑的
+    // logHost:logPort，方便在电脑上看日志而不是在电视上翻。默认关闭。
+    logForward: false,      // 是否把服务日志转发到电脑
+    logHost: '192.168.1.6', // 电脑 IP（同一局域网）
+    logPort: 5555           // 电脑上 UDP 监听端口（receive-log.ps1）
 };
 
 var service = new Service(SERVICE_NAME);
-var startedAt = Date.now();
 var lastSend = { at: 0, ok: false, error: '' };
 
 /* ------------------------------------------------------------------ *
@@ -122,8 +201,62 @@ function normalizeConfig(c) {
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
         port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
-        broadcast: c ? c.broadcast !== false : true
+        broadcast: c ? c.broadcast !== false : true,
+        logForward: c ? c.logForward !== false : false,
+        logHost: (c && c.logHost) || DEFAULT_CONFIG.logHost,
+        logPort: (c && typeof c.logPort === 'number') ? c.logPort : DEFAULT_CONFIG.logPort
     };
+}
+
+/* ------------------------------------------------------------------ *
+ *  UDP log forwarding to a PC on the LAN
+ *  ------------------------------------------------------------------ *
+ *  服务每次 console.log 都会走上面的包装器，这里再把同一行通过 UDP 推给
+ *  局域网内的电脑（logHost:logPort），方便在电脑上实时看日志。默认关闭；
+ *  开启后 fire-and-forget 发送，网络异常/目标不在线都静默忽略，绝不影响
+ *  服务本身。datagram 最大约 64KB，而我们的单行已限长 2000 字符，安全。
+ * ------------------------------------------------------------------ */
+var LOG_FWD_SOCKET_TIMEOUT_MS = 120000; // 空闲多久后关闭 UDP socket
+var logFwdSocket = null;
+var logFwdTimer = null;
+
+function closeLogFwdSocket() {
+    if (logFwdTimer) { clearTimeout(logFwdTimer); logFwdTimer = null; }
+    if (logFwdSocket) {
+        try { logFwdSocket.close(); } catch (e) { /* noop */ }
+        logFwdSocket = null;
+    }
+}
+
+function ensureLogFwdSocket() {
+    if (logFwdSocket) { return logFwdSocket; }
+    try {
+        logFwdSocket = dgram.createSocket('udp4');
+        logFwdSocket.on('error', function () { closeLogFwdSocket(); });
+    } catch (e) {
+        logFwdSocket = null;
+    }
+    return logFwdSocket;
+}
+
+function logForwardLine(line) {
+    // 从当前缓存配置读取开关与目标；DB 未加载时退回默认（默认关闭）。
+    var c = configCache || DEFAULT_CONFIG;
+    if (!c || !c.logForward || !c.logHost) { return; }
+    var sock = ensureLogFwdSocket();
+    if (!sock) { return; }
+    var port = (typeof c.logPort === 'number' && c.logPort > 0)
+        ? c.logPort : DEFAULT_CONFIG.logPort;
+    var buf = Buffer.from(String(line), 'utf8');
+    if (buf.length === 0) { return; }
+    try {
+        sock.send(buf, 0, buf.length, port, c.logHost, function () {
+            // 空闲一段时间后关掉 socket，避免服务长期持有不必要的资源；
+            // 下一条日志需要时再惰性重建。
+            if (logFwdTimer) { clearTimeout(logFwdTimer); }
+            logFwdTimer = setTimeout(closeLogFwdSocket, LOG_FWD_SOCKET_TIMEOUT_MS);
+        });
+    } catch (e) { /* 静默：日志转发失败不影响服务 */ }
 }
 
 function loadConfig(cb) {
@@ -149,6 +282,9 @@ function saveConfig(cfg, cb) {
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
         obj.broadcast = cfg.broadcast !== false;
+        obj.logForward = cfg.logForward !== false;
+        obj.logHost = (cfg.logHost || DEFAULT_CONFIG.logHost).toString();
+        obj.logPort = typeof cfg.logPort === 'number' ? cfg.logPort : DEFAULT_CONFIG.logPort;
 
         // Update in-memory cache immediately so the app is consistent.
         configCache = normalizeConfig(obj);
@@ -554,15 +690,19 @@ function sendMagicPacket(cfg, cb) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Service entry point: auto-send at boot, no complex logic
+ *  Service entry point: auto-send at boot
  * ------------------------------------------------------------------ *
- *  开机触发器已简化：不再判断网络是否就绪、不再读取默认路由、不再做
- *  各种兜底，而是电视开机后立即开始，在 90 秒窗口内持续循环发送魔术包
- *  （每 2 秒一次，UDP 广播）。连续多次发送显著提高对 Win 电脑的唤醒
- *  成功率，也规避了「开机瞬间网络还没就绪导致第一次发送无效」的问题。
+ *  关键修复（2026-10-10）：此前「开机即发、不做网络就绪判断」导致电视冷开机
+ *  后 Wi-Fi 还没连上就发广播包，包根本出不去，电脑永远不醒（手动测试因为电视
+ *  已在线所以正常）。现在改为：先等网络真正就绪（有 IPv4 + 有默认路由），再在
+ *  发送窗口内每 2 秒持续重发。同时用进程级防抖避免 Activity 反复拉起服务、
+ *  每次都从头重发、浪费窗口。
  * ------------------------------------------------------------------ */
-var BOOT_SEND_WINDOW_MS = 90000;   // 开机后 90 秒的发送窗口
-var BOOT_SEND_INTERVAL_MS = 2000;  // 窗口期内每 2 秒重发一次魔术包
+var BOOT_SEND_WINDOW_MS = 90000;      // 开机后 90 秒的发送窗口
+var BOOT_SEND_INTERVAL_MS = 2000;     // 窗口期内每 2 秒重发一次魔术包
+var BOOT_NET_WAIT_TIMEOUT_MS = 30000; // 等网络就绪的最长时间（30s）
+var BOOT_NET_POLL_MS = 1000;          // 轮询网络就绪的间隔
+var bootLoopRunning = false;          // 进程级防抖：同进程只跑一轮开机发送
 
 function startBootAutosend() {
     var sendCfg = configCache ? JSON.parse(JSON.stringify(configCache))
@@ -574,6 +714,14 @@ function startBootAutosend() {
             if (res && res.returnValue && res.results && res.results.length) {
                 sendCfg = normalizeConfig(res.results[0]);
                 configCache = JSON.parse(JSON.stringify(sendCfg));
+            }
+            // 进程级防抖：电视开机后 Activity 触发器可能把本服务拉起多次（每次
+            // service registered 都会再跑 startBootAutosend）。若发送循环已在
+            // 本进程跑着，就忽略这次，避免重复从头发送 / 反复重建 Activity
+            // 造成自触发循环（日志里曾看到 service registered 连续出现 3 次）。
+            if (bootLoopRunning) {
+                console.log('wol: boot loop already running in this process; skip re-arm');
+                return;
             }
             // Re-arm the persistent boot Activity to match the stored config.
             // (replace:true makes this idempotent, and it self-heals if the
@@ -587,35 +735,66 @@ function startBootAutosend() {
 }
 
 function runBootSendLoop(cfg) {
+    if (bootLoopRunning) { return; }   // 同一进程只跑一轮
+    bootLoopRunning = true;
+
     if (!(cfg.enabled && cfg.sendOnBoot)) {
         console.log('wol: boot auto-send disabled (enabled=' + cfg.enabled +
             ', sendOnBoot=' + cfg.sendOnBoot + ')');
+        bootLoopRunning = false;
         return;
     }
 
-    var windowStart = Date.now();
-    var sent = 0;
+    var waitStart = Date.now();
 
-    function sendOnce() {
-        if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
-            bootAutoState.lastWol = 'done';
-            console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
+    // 关键修复：电视冷开机后 Wi-Fi 还没连上，此时立刻发广播包根本出不去
+    // （这就是「手动测试能唤醒、开机自动却不醒」的根因）。先等网络真正
+    // 就绪（有真实 IPv4 且有默认路由）再进入发送窗口；最多等 30s，超时
+    // 也照发，避免永久卡住。
+    function waitReady() {
+        if (networkReady()) {
+            console.log('wol: network ready after ' + (Date.now() - waitStart) + 'ms; starting boot send');
+            startWindow();
             return;
         }
-        sendWOL(cfg, function (err) {
-            if (err) {
-                bootAutoState.lastWol = 'error';
-                console.log('wol: boot send failed: ' + err.message);
-            } else {
-                sent++;
-                bootAutoState.lastWol = 'sent';
-                recordSend(true, '');
-                console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
-            }
-        });
-        setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
+        if (Date.now() - waitStart >= BOOT_NET_WAIT_TIMEOUT_MS) {
+            bootAutoState.lastWol = 'error';
+            console.log('wol: network not ready within ' + BOOT_NET_WAIT_TIMEOUT_MS +
+                'ms; sending anyway');
+            startWindow();
+            return;
+        }
+        setTimeout(waitReady, BOOT_NET_POLL_MS);
     }
-    sendOnce();
+
+    function startWindow() {
+        var windowStart = Date.now();
+        var sent = 0;
+
+        function sendOnce() {
+            if (Date.now() - windowStart >= BOOT_SEND_WINDOW_MS) {
+                bootAutoState.lastWol = 'done';
+                bootLoopRunning = false;
+                console.log('wol: boot send loop finished (90s window, ' + sent + ' packets sent)');
+                return;
+            }
+            sendWOL(cfg, function (err) {
+                if (err) {
+                    bootAutoState.lastWol = 'error';
+                    console.log('wol: boot send failed: ' + err.message);
+                } else {
+                    sent++;
+                    bootAutoState.lastWol = 'sent';
+                    recordSend(true, '');
+                    console.log('wol: boot magic packet ' + sent + ' sent -> ' + cfg.mac);
+                }
+            });
+            setTimeout(sendOnce, BOOT_SEND_INTERVAL_MS);
+        }
+        sendOnce();
+    }
+
+    waitReady();
 }
 
 try {
@@ -636,36 +815,18 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        // 时机关键：开机触发器在 connectionmanager 状态一变化（常早于 WiFi 连上）就会
-        // 回调本方法。此时网络未就绪、还没拿到 IP，发 UDP 魔术包是无效的。
-        // 这里先等 networkReady()（拿到真实 IPv4 地址）再发；等待期间不 respond，
-        // 让请求保持 pending，服务进程也不会提前退出。手动点「立即唤醒」时网络已就绪，
-        // 会立即发送、无额外延迟。
-        var waitStart = Date.now();
-        var MAX_NET_WAIT_MS = 120000; // 最多等 2 分钟，足够冷启动连上 WiFi
-        function attemptSend() {
-            if (networkReady()) {
-                sendMagicPacket(cfg, function (sendErr) {
-                    if (sendErr) {
-                        bootAutoState.lastWol = 'error';
-                        message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
-                    } else {
-                        bootAutoState.lastWol = 'sent';
-                        console.log('wol: wake sent after network ready');
-                        message.respond({ returnValue: true, sent: true });
-                    }
-                });
-                return;
+        // 直接发送一次魔术包，不做网络就绪等复杂判断。开机唤醒的持续循环
+        // 发送由 startBootAutosend 在 90 秒窗口内负责，这里仅处理手动触发。
+        sendMagicPacket(cfg, function (sendErr) {
+            if (sendErr) {
+                bootAutoState.lastWol = 'error';
+                message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
+            } else {
+                bootAutoState.lastWol = 'sent';
+                console.log('wol: wake sent -> ' + cfg.mac);
+                message.respond({ returnValue: true, sent: true });
             }
-            if (Date.now() - waitStart >= MAX_NET_WAIT_MS) {
-                bootAutoState.lastWol = 'timeout';
-                console.log('wol: wake aborted, network not ready within ' + MAX_NET_WAIT_MS + 'ms');
-                message.respond({ returnValue: false, errorText: 'network not ready before timeout' });
-                return;
-            }
-            setTimeout(attemptSend, 500);
-        }
-        attemptSend();
+        });
     });
 });
 
@@ -714,6 +875,23 @@ service.register('getStatus', function (message) {
         localIp: getLocalIpv4(),
         bootAuto: bootAutoState
     });
+});
+
+service.register('getLog', function (message) {
+    // 返回服务进程缓存的内存日志（最近 LOG_MAX 行），供应用在电视上直接查看。
+    message.respond({
+        returnValue: true,
+        uptimeMs: Date.now() - startedAt,
+        lines: logLines.slice()
+    });
+});
+
+service.register('clearLog', function (message) {
+    // 清空内存缓冲与持久化日志文件（手动清空）。
+    logLines = [];
+    try { fs.writeFileSync(LOG_FILE, ''); } catch (e) { /* noop */ }
+    console.log('wol: log cleared manually');
+    message.respond({ returnValue: true, cleared: true });
 });
 
 service.register('setBootAuto', function (message) {

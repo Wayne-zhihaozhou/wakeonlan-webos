@@ -27,6 +27,11 @@
                     "public": true
                 },
                 {
+                    "name": "getLog",
+                    "description": "Return recent in-memory service log lines",
+                    "public": true
+                },
+                {
                     "name": "setBootAuto",
                     "description": "Enable/disable the persistent boot auto-launch activity",
                     "public": true

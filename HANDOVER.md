@@ -58,6 +58,15 @@ ares-log --device lg com.woltv.wakeonlan.service
 ```
 成功应看到：`wol: service started; network already ready; sending magic packet now`（或 `waiting for network...`）和 `wol: magic packet sent to ...`。
 
+### 把日志实时推送到电脑上看（推荐，不用开 ares-log）
+电视应用里勾选「**把日志转发到电脑**」、填好「电脑 IP」(`192.168.1.6`) 与端口(`5555`) 并**保存**后，
+在电脑上运行监听脚本即可实时收到电视推来的每一行日志并自动落盘：
+```powershell
+cd C:\0_Code\wakeonlan-webos
+powershell -ExecutionPolicy Bypass -File .\receive-log.ps1
+```
+日志保存到 `logs\received\wol-<时间戳>.log`。电视每次开机/服务启动后日志会自动汇过来，按 Ctrl+C 停止。
+
 ### 卸载（不用了直接卸载应用即可，DB 一并清除）
 ```powershell
 ares-remove --device lg com.woltv.wakeonlan
@@ -98,7 +107,7 @@ powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员�
 | 打包警告 `requiredACG` | appinfo.json 里已加 `"requiredACG": []`。 |
 | 打包警告 Node 版本 | 服务代码已用 ES5 风格（`var`/回调），兼容旧 Node，可忽略。 |
 | 保存一直「保存中」或提示超时 | 旧版已修：DB 调用带超时+内存缓存、服务启动全程容错、前端回调 `return true`+12s 超时、打开时自检。若仍提示「后台服务无响应」，用 `ares-log` 看 `wol_service.js` 日志，或重启电视/重装。 |
-| 开机不自动唤醒电脑 | 检查 ① 应用里「开机自动发送」是否开且保存后状态栏显示「开机自启已启用 ✓」 ② 电脑侧 `check-wol-win.ps1` 是否全 OK ③ `ares-log` 是否打印 `wol: boot auto-launch armed` 与 `magic packet sent`。若打印 `boot auto-launch FAILED` 说明该固件对第三方 Activity Manager 权限较严，改用「常开设备监测 TV 上线」方案。 |
+| 开机不自动唤醒电脑 | 检查 ① 应用里「开机自动发送」是否开且保存后状态栏显示「开机自启已启用 ✓」 ② 电脑侧 `check-wol-win.ps1` 是否全 OK ③ `ares-log` 是否打印 `wol: boot auto-launch armed` 与 `magic packet sent`。若打印 `boot auto-launch FAILED`，说明该固件对第三方 Activity Manager 权限较严，可先抓开机日志定位断在哪一环。 |
 
 ## 8. 编码 / 文件格式避坑（重要，改文件前必读）
 
@@ -137,6 +146,8 @@ powershell -ExecutionPolicy Bypass -File .\check-wol-win.ps1 -Fix  # 管理员�
 | --- | --- |
 | `deploy-wakeonlan.ps1` | 一键部署脚本（断 VPN 后运行） |
 | `check-wol-win.ps1` | **Windows 侧 WOL 设置检查/一键修复脚本** |
+| `receive-log.ps1` | 电脑端实时接收电视推送的日志（UDP 监听 + 落盘） |
+| `capture-boot-log.ps1` | 抓取电视冷开机后服务日志（`ares-log` 版，替代方案） |
 | `services/.../wol_service.js` | 后台服务：发魔术包 + DB8 配置 + 开机自启 + 局域网扫描 |
 | `services/.../services.json` | 声明服务总线方法 |
 | `js/app.js` | 前端：遥控器导航 + 下拉选设备 + 开关 + 测试唤醒 |

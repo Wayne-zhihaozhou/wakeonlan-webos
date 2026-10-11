@@ -34,6 +34,8 @@ wakeonlan-webos/
 ├── css/style.css                         # 前端样式
 ├── js/app.js                             # 前端逻辑（PalmServiceBridge 调用服务）
 ├── deploy-wakeonlan.ps1                  # 一键打包/安装/启动脚本（断 VPN 后运行）
+├── capture-boot-log.ps1                  # 抓取电视冷开机后服务日志（电脑侧 ares-log）
+├── receive-log.ps1                       # 电脑端实时接收「电视推送」的日志（UDP 监听）
 └── services/
     └── com.woltv.wakeonlan.service/
         ├── package.json                  # 服务 npm 配置（main 指向服务入口）
@@ -121,8 +123,30 @@ ares-log --device <设备名> com.woltv.wakeonlan.service
   首次在应用里**保存设置**时，后台服务会向 `com.palm.activitymanager` 注册一个持久化 Activity；
   之后电视每次开机、网络一就绪即自动触发发送，无需再打开应用。界面状态栏会显示「开机自启已启用 ✓」。
   验证：开机后观察 `ares-log` 应打印 `wol: boot auto-launch armed` 和 `wol: magic packet sent to ...`。
-  若固件权限较严导致 `create` 失败（打印 `boot auto-launch FAILED`），应用仍可手动唤醒（点「立即唤醒」），
-  可考虑改用「常开设备监测 TV 上线」方案（见 README 结尾说明）。
+  若固件权限较严导致 `create` 失败（打印 `boot auto-launch FAILED`），应用仍可手动唤醒（点「立即唤醒」）。
+
+## 把电视日志实时推送到电脑（局域网内看日志）
+
+电视上翻日志太难受，本项目支持**把服务的每一行运行日志通过 UDP 实时推送到局域网内的电脑**，
+你在电脑上边看边存盘，不用开电视应用/`ares-log` 也能追踪开机唤醒链路。
+
+**电视端设置**（打开电视应用 → 遥控器操作）：
+1. 勾选「**把日志转发到电脑**」；
+2. 「电脑 IP」填这台电脑的局域网 IP（默认 `192.168.1.6`）；
+3. 端口保持 `5555`；
+4. 点「**保存**」。
+
+**电脑端接收**（电脑上、确保与电视同一局域网）：
+```powershell
+cd C:\0_Code\wakeonlan-webos
+powershell -ExecutionPolicy Bypass -File .\receive-log.ps1
+```
+脚本会实时把电视推来的每一行打印在屏幕上，并追加保存到 `logs\received\wol-<时间戳>.log`。
+保持窗口开着，电视每次开机/服务启动后日志就会自动汇过来；按 Ctrl+C 停止。
+
+> 原理：`wol_service.js` 给 `console.log` 做了包装，每打一行就额外用 UDP（默认端口 5555）
+> 把带时间戳的行推给 `logHost`。默认关闭；开启后 fire-and-forget，网络异常/目标不在线都
+> 静默忽略，绝不影响唤醒功能。若只想在某次开机时抓日志，也可用 `capture-boot-log.ps1`。
 
 ## 电脑（Win11）侧必备设置（否则发出去也开不了机）
 
@@ -158,4 +182,5 @@ ares-log --device <设备名> com.woltv.wakeonlan.service
 | `services/com.woltv.wakeonlan.service/wol_service.js` | 后台服务：`dgram` 发魔术包 + DB8 存/读配置 + 开机自启发送 |
 | `services/com.woltv.wakeonlan.service/services.json` | 声明服务名与总线方法（wake / getConfig / setConfig / getStatus） |
 | `js/app.js` | 前端逻辑：加载/保存配置、开关、测试唤醒 |
+| `receive-log.ps1` | 电脑端实时接收电视推送的日志（UDP 监听 + 落盘） |
 | `appinfo.json` | 应用元数据（含 requiredACG） |
