@@ -14,6 +14,10 @@
  *     getStatus  -> last send result / service uptime
  *     scan       -> scan the LAN (ping sweep + ARP table) for devices
  *
+ * - Every console.log line is also forwarded over UDP to a PC on the LAN
+ *   (logHost:logPort) when "logForward" is enabled, so all logs are viewed
+ *   on the computer (see receive-log.ps1) instead of on the TV.
+ *
  * Uses only built-in Node modules (`dgram`, `os`, `fs`, `net`)
  * plus the webOS `webos-service` module, which is pre-installed on the TV.
  * No npm install needed.
@@ -26,54 +30,12 @@ var fs = require('fs');
 var net = require('net');
 
 /* ------------------------------------------------------------------ *
- *  In-app log ring buffer
+ *  console.log wrapper (used by all log output)
  *  ------------------------------------------------------------------ *
- *  webOS 电视上不方便查看电脑端的日志文件，所以把服务自身的运行日志缓存
- *  在内存里，通过 getLog 总线方法暴露，前端应用可随时拉取并显示在电视屏
- *  幕上——排障时直接在电视上看，不必再 ssh / ares-log 去抓文件。
+ *  服务不把日志缓存在内存里给电视端显示（那部分已移除）；每打一行就带时间戳
+ *  通过 UDP 转发到电脑（logHost:logPort），由 receive-log.ps1 接收落盘，
+ *  所有日志统一在电脑端查看。转发失败/目标不在线时静默忽略，绝不影响服务。
  * ------------------------------------------------------------------ */
-var LOG_MAX = 400;        // 最多保留最近 400 行
-var LOG_LINE_MAX = 2000;  // 单行最长 2000 字符，避免单条超长 JSON 撑爆 getLog 总线响应
-var LOG_FILE = '/tmp/wol_service.log';    // 日志持久化文件
-var START_FILE = '/tmp/wol_service_start'; // 最早启动时间标记文件
-var logLines = [];
-
-// webOS 的 JS 服务进程是按需拉起、空闲时可能被系统回收重启的。若日志只放内存，
-// 一旦服务进程被重启（应用/电视本身都没重启也一样），日志会被清成只剩注册那一
-// 行、运行时间归 0——这正是之前看到的“1 行 / 0 秒”。这里把日志行和最早启动时间
-// 持久化到 /tmp：
-//   - 仅服务进程重启时，日志与运行时间都能续上，不再出现“1 行 / 0 秒”；
-//   - 电视重启后 /tmp 会被清空，日志重新从 0 开始（属预期）。
-function readLogFromFile() {
-    try {
-        var arr = String(fs.readFileSync(LOG_FILE, 'utf8')).split('\n');
-        var out = [];
-        for (var i = 0; i < arr.length; i++) { if (arr[i]) { out.push(arr[i]); } }
-        if (out.length > LOG_MAX) { out = out.slice(out.length - LOG_MAX); }
-        return out;
-    } catch (e) { return []; }
-}
-function appendLogToFile(line) {
-    try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) { /* 写不进就退回纯内存 */ }
-}
-function rewriteLogFile() {
-    try {
-        fs.writeFileSync(LOG_FILE, logLines.join('\n') + (logLines.length ? '\n' : ''));
-    } catch (e) { /* noop */ }
-}
-logLines = readLogFromFile();
-
-function initStartedAt() {
-    try {
-        var t = parseInt(String(fs.readFileSync(START_FILE, 'utf8')).trim(), 10);
-        if (t && t > 0) { return t; }
-    } catch (e) { /* 首次运行或文件不可读 */ }
-    var now = Date.now();
-    try { fs.writeFileSync(START_FILE, String(now)); } catch (e) { /* noop */ }
-    return now;
-}
-var startedAt = initStartedAt();
-
 var origLog = console.log;
 console.log = function () {
     var parts = [];
@@ -82,17 +44,6 @@ console.log = function () {
         parts.push(typeof a === 'string' ? a : safeStr(a));
     }
     var line = '[' + new Date().toISOString() + '] ' + parts.join(' ');
-    if (line.length > LOG_LINE_MAX) {
-        line = line.slice(0, LOG_LINE_MAX) + ' …(此行过长已截断)';
-    }
-    logLines.push(line);
-    var trimmed = false;
-    if (logLines.length > LOG_MAX) {
-        logLines.splice(0, logLines.length - LOG_MAX);
-        trimmed = true;
-    }
-    appendLogToFile(line);
-    if (trimmed) { rewriteLogFile(); } // 裁剪内存缓冲时同步重写文件，避免文件无限增长
     logForwardLine(line); // 若开启日志转发，把带时间戳的行推给电脑
     try { origLog.apply(console, arguments); } catch (e) { /* noop */ }
 };
@@ -139,7 +90,7 @@ var AM_URI = 'luna://com.palm.activitymanager';
 var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
 // lastWol: 最近一次唤醒路径的结果，用于在 UI 上直接诊断「开机触发链路」——
 // none=服务启动后还未触发过唤醒；sent=已发出魔术包；timeout=等网络就绪超时；error=发送失败。
-var bootAutoState = { armed: false, error: '', raw: '', trigger: '', diag: '', lastWol: 'none' };
+var bootAutoState = { armed: false, error: '', diag: '', lastWol: 'none' };
 // 不同 webOS 版本的连接管理服务名不同：新版用 com.webos.service.connectionmanager，
 // 旧版用 com.palm.connectionmanager。按顺序逐个尝试，直到 Activity 被成功受理。
 var BOOT_TRIGGER_METHODS = [
@@ -331,8 +282,6 @@ function setBootAuto(enabled, cb) {
             // A "not found" is fine here (already disabled).
             bootAutoState.armed = false;
             bootAutoState.error = '';
-            bootAutoState.raw = '';
-            bootAutoState.trigger = '';
             bootAutoState.diag = '';
             console.log('wol: boot auto-launch disabled');
             done(null);
@@ -355,13 +304,11 @@ function setBootAuto(enabled, cb) {
         createActivity(triggerUri, true, function (res) {
             tried++;
             lastRes = res || {};
-            bootAutoState.raw = JSON.stringify(lastRes);
             console.log('wol: activity create [' + tried + '] trigger=' + triggerUri +
                 ' -> ' + JSON.stringify(lastRes));
             if (lastRes.returnValue) {
                 bootAutoState.armed = true;
                 bootAutoState.error = '';
-                bootAutoState.trigger = triggerUri;
                 console.log('wol: boot auto-launch ARMED via ' + triggerUri);
                 done(null);
                 return;
@@ -869,39 +816,10 @@ service.register('setConfig', function (message) {
 service.register('getStatus', function (message) {
     message.respond({
         returnValue: true,
-        uptimeMs: Date.now() - startedAt,
         lastSend: lastSend,
         networkReady: networkReady(),
         localIp: getLocalIpv4(),
         bootAuto: bootAutoState
-    });
-});
-
-service.register('getLog', function (message) {
-    // 返回服务进程缓存的内存日志（最近 LOG_MAX 行），供应用在电视上直接查看。
-    message.respond({
-        returnValue: true,
-        uptimeMs: Date.now() - startedAt,
-        lines: logLines.slice()
-    });
-});
-
-service.register('clearLog', function (message) {
-    // 清空内存缓冲与持久化日志文件（手动清空）。
-    logLines = [];
-    try { fs.writeFileSync(LOG_FILE, ''); } catch (e) { /* noop */ }
-    console.log('wol: log cleared manually');
-    message.respond({ returnValue: true, cleared: true });
-});
-
-service.register('setBootAuto', function (message) {
-    var p = message.payload || {};
-    setBootAuto(!!p.enabled, function (err) {
-        if (err) {
-            message.respond({ returnValue: false, errorText: err.message });
-        } else {
-            message.respond({ returnValue: true, armed: bootAutoState.armed });
-        }
     });
 });
 

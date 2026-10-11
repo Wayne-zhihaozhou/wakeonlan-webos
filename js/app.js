@@ -33,19 +33,10 @@
         save: document.getElementById('btnSave'),
         exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
-        status: document.getElementById('status'),
-        btnLog: document.getElementById('btnLog'),
-        logCard: document.getElementById('logCard'),
-        logView: document.getElementById('logView'),
-        logMeta: document.getElementById('logMeta'),
-        logRefresh: document.getElementById('btnLogRefresh'),
-        logClear: document.getElementById('btnLogClear'),
-        logClose: document.getElementById('btnLogClose')
+        status: document.getElementById('status')
     };
 
     var devicesCache = []; // last scan results
-    var logOpen = false;   // whether the in-app log panel is showing
-    var logActive = 0;     // index of the highlighted log control (刷新/关闭)
 
     /* ---------------- service call helper (PalmServiceBridge) ------- */
     // webOS 要求 onservicecallback 返回 true，否则某些固件会丢弃响应导致卡住；
@@ -99,82 +90,6 @@
 
     function showError(err) {
         setStatus('错误: ' + (err && (err.errorText || err.message) || '未知错误'), 'err');
-    }
-
-    /* ---------------- in-app log viewer ------------------------------ */
-    // 在电视上直接查看服务进程的内存日志（getLog），排障不必去电脑端抓文件。
-
-    // 电视浏览器对 CSS `white-space: pre-wrap` 支持不牢靠，超长单行（例如
-    // 一条完整的 activity create JSON 响应）会被容器宽度横向裁掉、且滚不出来。
-    // 因此在 JS 端主动按固定宽度把长行拆成多行，保证任何长行都能完整显示。
-    var LOG_WRAP_WIDTH = 90;
-    // 日志打开时，上/下键显式滚动整页的步长（像素），用于 webOS 上可靠地翻页。
-    var PAGE_SCROLL_STEP = 160;
-
-    function wrapLogLine(line) {
-        var s = String(line || '');
-        if (s.length <= LOG_WRAP_WIDTH) { return s; }
-        var out = [];
-        var rest = s;
-        while (rest.length > LOG_WRAP_WIDTH) {
-            out.push(rest.slice(0, LOG_WRAP_WIDTH));
-            rest = rest.slice(LOG_WRAP_WIDTH);
-        }
-        if (rest.length) { out.push(rest); }
-        return out.join('\n');
-    }
-
-    function renderLog(lines) {
-        var wrapped = [];
-        for (var i = 0; i < lines.length; i++) {
-            wrapped.push(wrapLogLine(lines[i]));
-        }
-        // 日志区为无限高度、随整页滚动，无需（也无法）在容器内部滚到底。
-        els.logView.textContent = wrapped.length ? wrapped.join('\n') : '（服务暂无日志输出）';
-    }
-
-    function loadLog() {
-        els.logView.textContent = '正在加载日志…';
-        els.logMeta.textContent = '';
-        callService('getLog', {}, 8000)
-            .then(function (res) {
-                var lines = res.lines || [];
-                renderLog(lines);
-                els.logMeta.textContent = '共 ' + lines.length + ' 行 · 服务已运行 ' +
-                    Math.round((res.uptimeMs || 0) / 1000) + ' 秒';
-                setStatus('日志已加载', 'ok');
-            })
-            .catch(function (err) {
-                els.logView.textContent = '加载日志失败：' +
-                    (err && (err.errorText || err.message) || '未知错误');
-                setStatus('日志加载失败', 'err');
-            });
-    }
-
-    function openLog() {
-        logOpen = true;
-        els.logCard.hidden = false;
-        loadLog();
-        // 日志随整页滚动；打开时把日志卡片带到可见区域，之后用滚轮滚动整页查看。
-        els.logCard.scrollIntoView({ block: 'start' });
-        els.logView.focus();
-    }
-
-    function closeLog() {
-        logOpen = false;
-        els.logCard.hidden = true;
-        els.btnLog.focus();
-    }
-
-    function logFocusOrder() {
-        return [els.logRefresh, els.logClear, els.logClose].filter(function (el) { return el && el.offsetParent !== null; });
-    }
-
-    function focusLogControl(delta) {
-        var order = logFocusOrder();
-        if (order.length === 0) { return; }
-        logActive = (logActive + delta + order.length) % order.length;
-        order[logActive].focus();
     }
 
     /* ---------------- device dropdown ------------------------------- */
@@ -472,7 +387,7 @@
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
             els.swEnabled, els.swSendOnBoot, els.swLogForward, els.logHost, els.logPort,
-            els.save, els.exit, els.wake, els.btnLog
+            els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
     }
@@ -518,23 +433,6 @@
 
     document.addEventListener('keydown', function (e) {
         var key = e.keyCode;
-
-        // While the log panel is open, route keys inside it.
-        if (logOpen) {
-            // 日志是「无限高度、随整页滚动」。webOS 浏览器对「方向键默认滚动整页」
-            // 支持不可靠，因此这里显式用 window.scrollBy 滚动整个页面，滚轮（在
-            // 非 overflow 元素上）默认也是滚动整页——两者都只拖页面、不碰日志内容。
-            if (key === 40) { e.preventDefault(); window.scrollBy(0, PAGE_SCROLL_STEP); return; }  // down: 整页下滚
-            if (key === 38) { e.preventDefault(); window.scrollBy(0, -PAGE_SCROLL_STEP); return; } // up: 整页上滚
-            if (key === 37 || key === 39) { e.preventDefault(); focusLogControl(key === 39 ? 1 : -1); return; }
-            if (key === 13) { e.preventDefault(); activateFocused(); return; }
-            if (key === 461 || key === 8 || key === 27) { // Back / Exit / Esc: close
-                e.preventDefault();
-                closeLog();
-                return;
-            }
-            return;
-        }
 
         // While the device list is open, route keys inside it.
         if (deviceOpen) {
@@ -606,22 +504,6 @@
     els.save.addEventListener('click', saveConfig);
     els.exit.addEventListener('click', exitApp);
     els.wake.addEventListener('click', wakeNow);
-    els.btnLog.addEventListener('click', function () {
-        if (logOpen) { closeLog(); } else { openLog(); }
-    });
-    els.logRefresh.addEventListener('click', loadLog);
-    els.logClear.addEventListener('click', function () {
-        callService('clearLog', {}, 8000)
-            .then(function () {
-                els.logView.textContent = '';
-                els.logMeta.textContent = '已清空日志';
-                setStatus('日志已清空', 'ok');
-            })
-            .catch(function (err) {
-                setStatus('清空日志失败：' + ((err && (err.errorText || err.message)) || '未知错误'), 'err');
-            });
-    });
-    els.logClose.addEventListener('click', closeLog);
 
     loadConfig();
     // Give the TV remote something focused right away.

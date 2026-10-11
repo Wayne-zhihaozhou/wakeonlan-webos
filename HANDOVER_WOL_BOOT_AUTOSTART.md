@@ -58,8 +58,8 @@
      `service.call(uri + '/' + method, parameters)`，不能传 `{method, parameters}` 包装。
    - **修复时机**：`wake` 会先等 `networkReady()`（最多 2 分钟）再发，等待期间不 `respond`。
    - `setConfig`/`startBootAutosend` 按配置自动同步武装；`getStatus` 返回 `bootAuto`。
-   - 新增总线方法 `setBootAuto`。
-2. `services/com.woltv.wakeonlan.service/services.json` —— 新增 `setBootAuto` 命令。
+   - `setBootAuto(enabled, cb)` 为**内部函数**（非总线方法），由 `setConfig`/`startBootAutosend` 内部调用。
+2. `services/com.woltv.wakeonlan.service/services.json` —— 声明总线命令（不含 `setBootAuto`，其为内部逻辑）。
 3. `js/app.js` —— 状态栏显示开机自启状态 + **UI 自动诊断**（无需看日志）。
 4. `README.md`、`HANDOVER.md`、`HANDOVER_WOL_BOOT_AUTOSTART.md` —— 文档同步。
 
