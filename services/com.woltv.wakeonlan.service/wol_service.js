@@ -887,6 +887,68 @@ function buildMagicPacket(mac) {
     return packet;
 }
 
+/* ------------------------------------------------------------------ *
+ *  网络就绪检测 + 等待（每次发送魔术包前的网络门禁）
+ *  ------------------------------------------------------------------ *
+ *  要求：每次发送魔术包前先确认电视已联网；若尚未联网则每隔几秒重查一次，
+ *  直到联网为止；最多等待 5 分钟（NET_CHECK_TIMEOUT_MS），超时则放弃本次发送。
+ *  通过 com.webos.service.connectionmanager/getStatus 判断，兼容不同固件上
+ *  wired/wifi/state/internetConnectionState 等不同的返回字段。
+ * ------------------------------------------------------------------ */
+var NET_CHECK_INTERVAL_MS = 5000;              // 未联网时每 5 秒重查一次
+var NET_CHECK_TIMEOUT_MS = 5 * 60 * 1000;      // 等待网络的总超时：5 分钟
+
+// 查询电视是否已联网，结果通过 cb(true/false) 返回（查询失败视为未联网）。
+function networkReady(cb) {
+    lunaCall('luna://com.webos.service.connectionmanager', 'getStatus', {}, function (res) {
+        if (!res || !res.returnValue) { cb(false); return; }
+        var state = String(res.state || '').toLowerCase();
+        var inetState = String(res.internetConnectionState || '').toLowerCase();
+        var ok =
+            res.connected === true || res.connected === 'connected' ||
+            (res.wired && (res.wired.connected === true ||
+                String(res.wired.state || '').toLowerCase() === 'connected')) ||
+            (res.wifi && (res.wifi.connected === true ||
+                String(res.wifi.state || '').toLowerCase() === 'connected')) ||
+            state === 'connected' || state === 'ipv4' || state === 'ipv6' ||
+            inetState === 'connected';
+        cb(ok);
+    }, 3000);
+}
+
+// 等到网络就绪后再发送一次魔术包。未联网则间隔轮询，超时 5 分钟则 cb 报错、
+// 放弃本次发送。保证「每次发送前都确认有网络连接」。
+function sendWOLWhenNetworkReady(cfg, cb) {
+    var deadline = Date.now() + NET_CHECK_TIMEOUT_MS;
+    var done = false;
+
+    function finish(err) {
+        if (done) { return; }
+        done = true;
+        if (cb) { cb(err); }
+    }
+
+    function checkAndSend() {
+        if (Date.now() > deadline) {
+            console.log('wol: network not ready within ' + (NET_CHECK_TIMEOUT_MS / 60000) +
+                ' min; skip this send');
+            finish(new Error('network not ready within 5 minutes'));
+            return;
+        }
+        networkReady(function (ok) {
+            if (done) { return; }
+            if (ok) {
+                sendWOL(cfg, function (err) { finish(err); });
+            } else {
+                console.log('wol: no network yet; re-check in ' +
+                    (NET_CHECK_INTERVAL_MS / 1000) + 's');
+                setTimeout(checkAndSend, NET_CHECK_INTERVAL_MS);
+            }
+        });
+    }
+    checkAndSend();
+}
+
 function sendWOL(cfg, cb) {
     var packet;
     try {
@@ -939,7 +1001,7 @@ function recordSend(ok, error) {
 
 function sendMagicPacket(cfg, cb) {
     if (!cfg) { cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG)); }
-    sendWOL(cfg, function (err) {
+    sendWOLWhenNetworkReady(cfg, function (err) {
         recordSend(!err, err && err.message);
         if (cb) { cb(err); }
     });
@@ -1009,7 +1071,7 @@ function runContinuousSendLoop(cfg) {
         (intervalMs / 1000) + 's, never stops while resident)');
 
     function sendOnce() {
-        sendWOL(cfg, function (err) {
+        sendWOLWhenNetworkReady(cfg, function (err) {
             if (err) {
                 bootAutoState.lastWol = 'error';
                 console.log('wol: continuous send failed: ' + err.message);
@@ -1019,8 +1081,9 @@ function runContinuousSendLoop(cfg) {
                 recordSend(true, '');
                 console.log('wol: magic packet ' + sent + ' sent -> ' + cfg.mac);
             }
+            // 等本次（含网络等待）结束后再排下一轮，避免未联网时叠出多个等待循环。
+            setTimeout(sendOnce, intervalMs);
         });
-        setTimeout(sendOnce, intervalMs);
     }
     sendOnce();
 }
