@@ -14,19 +14,13 @@ var DEFAULT_CONFIG = {
     mac: 'CC:28:AA:A7:B4:1F',
     ip: '255.255.255.255',
     port: 9,
-    broadcast: true,
-    sendIntervalSec: 1,
-    sendMaxCount: 100,
-    sendCount: 0
+    broadcast: true
 };
 
 var service = new Service(SERVICE_NAME);
 var lastSend = { at: 0, ok: false, error: '' };
 
-var AM_URI = 'luna://com.palm.activitymanager';
-var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
-var KEEPALIVE_ACTIVITY_NAME = BOOT_ACTIVITY_NAME + '.keepalive';
-var bootAutoState = { armed: false, error: '', lastWol: 'none', triggers: {} };
+var bootState = { error: '', lastSend: 'none' };
 
 var configCache = null;
 
@@ -67,13 +61,7 @@ function normalizeConfig(c) {
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
         port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
-        broadcast: c ? c.broadcast !== false : true,
-        sendIntervalSec: (c && typeof c.sendIntervalSec === 'number' && c.sendIntervalSec >= 1)
-            ? c.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec,
-        sendMaxCount: (c && typeof c.sendMaxCount === 'number' && c.sendMaxCount >= 1)
-            ? c.sendMaxCount : DEFAULT_CONFIG.sendMaxCount,
-        sendCount: (c && typeof c.sendCount === 'number' && c.sendCount >= 0)
-            ? c.sendCount : DEFAULT_CONFIG.sendCount
+        broadcast: c ? c.broadcast !== false : true
     };
 }
 
@@ -100,12 +88,6 @@ function saveConfig(cfg, cb) {
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
         obj.broadcast = cfg.broadcast !== false;
-        obj.sendIntervalSec = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
-            ? cfg.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
-        obj.sendMaxCount = (typeof cfg.sendMaxCount === 'number' && cfg.sendMaxCount >= 1)
-            ? cfg.sendMaxCount : DEFAULT_CONFIG.sendMaxCount;
-        obj.sendCount = (typeof cfg.sendCount === 'number' && cfg.sendCount >= 0)
-            ? cfg.sendCount : DEFAULT_CONFIG.sendCount;
 
         configCache = normalizeConfig(obj);
 
@@ -128,57 +110,6 @@ function saveConfig(cfg, cb) {
         }
         doPut();
     });
-}
-
-function cancelKeepalive(cb) {
-    var done = cb || function () {};
-    lunaCall(AM_URI, 'cancel', { name: KEEPALIVE_ACTIVITY_NAME }, function () {
-        bootAutoState.armed = false;
-        bootAutoState.error = '';
-        done(null);
-    }, 6000);
-}
-
-function armBootAuto(cb) {
-    var done = cb || function () {};
-    var base = configCache || JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-    base.sendCount = 0;
-    saveConfig(base, function () {
-        var sendInterval = (configCache && typeof configCache.sendIntervalSec === 'number')
-            ? configCache.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
-        if (sendInterval < 1) { sendInterval = 1; }
-        var pullKey = 'pull';
-        lunaCall(AM_URI, 'create', {
-            activity: {
-                name: KEEPALIVE_ACTIVITY_NAME,
-                description: 'Periodically send WOL magic packets on every TV power-on',
-                type: { background: true, persist: true },
-                schedule: { interval: sendInterval + 's', precise: true },
-                callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromPull: true, source: pullKey } }
-            },
-            replace: true,
-            start: true,
-            subscribe: true
-        }, function (res) {
-            var ok = !!(res && res.returnValue);
-            bootAutoState.triggers[pullKey] = {
-                armed: ok,
-                error: ok ? '' : ((res && (res.errorText || res.error)) || 'pull activity create failed')
-            };
-            bootAutoState.armed = ok;
-            bootAutoState.error = ok ? '' : bootAutoState.triggers[pullKey].error;
-            done(ok ? null : new Error(bootAutoState.error));
-        }, 6000);
-    });
-}
-
-function setBootAuto(enabled, cb) {
-    var done = cb || function () {};
-    if (!enabled) {
-        cancelKeepalive(done);
-        return;
-    }
-    armBootAuto(done);
 }
 
 function getLocalIpv4() {
@@ -433,26 +364,14 @@ function sendMagicPacket(cfg, cb) {
     });
 }
 
-function incrementAndMaybeStop(cfg, cb) {
-    var done = cb || function () {};
-    var count = (typeof cfg.sendCount === 'number' && cfg.sendCount > 0) ? cfg.sendCount : 0;
-    count += 1;
-    cfg.sendCount = count;
-    saveConfig(cfg, function (err, saved) {
-        var max = (saved && typeof saved.sendMaxCount === 'number')
-            ? saved.sendMaxCount : DEFAULT_CONFIG.sendMaxCount;
-        if (count >= max) {
-            cancelKeepalive(done);
-        } else {
-            done();
-        }
-    });
-}
-
 function startBootAutosend() {
     loadConfig(function (err, cfg) {
         configCache = JSON.parse(JSON.stringify(cfg));
-        setBootAuto(!!(cfg.enabled && cfg.sendOnBoot), function () {});
+        if (!(cfg.enabled && cfg.sendOnBoot)) { return; }
+        sendMagicPacket(cfg, function (sendErr) {
+            bootState.lastSend = sendErr ? 'error' : 'sent';
+            bootState.error = sendErr ? (sendErr.message || String(sendErr)) : '';
+        });
     });
 }
 
@@ -468,20 +387,18 @@ service.register('wake', function (message) {
 
         function respond(sendErr) {
             if (sendErr) {
-                bootAutoState.lastWol = 'error';
+                bootState.lastSend = 'error';
+                bootState.error = sendErr.message || String(sendErr);
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
-                bootAutoState.lastWol = 'sent';
+                bootState.lastSend = 'sent';
+                bootState.error = '';
                 message.respond({ returnValue: true, sent: true });
             }
         }
 
         sendMagicPacket(cfg, function (sendErr) {
-            if (p.fromPull && cfg.enabled && cfg.sendOnBoot) {
-                incrementAndMaybeStop(cfg, function () { respond(sendErr); });
-            } else {
-                respond(sendErr);
-            }
+            respond(sendErr);
         });
     });
 });
@@ -507,9 +424,7 @@ service.register('setConfig', function (message) {
             if (saveErr) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
-                setBootAuto(!!(saved.enabled && saved.sendOnBoot), function () {
-                    message.respond({ returnValue: true, config: saved, bootAuto: bootAutoState });
-                });
+                message.respond({ returnValue: true, config: saved, bootAuto: bootState });
             }
         });
     } catch (e) {
@@ -521,7 +436,7 @@ service.register('getStatus', function (message) {
     message.respond({
         returnValue: true,
         lastSend: lastSend,
-        bootAuto: bootAutoState
+        bootAuto: bootState
     });
 });
 

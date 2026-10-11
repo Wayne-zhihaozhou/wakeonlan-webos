@@ -48,16 +48,15 @@ wake 方法
 | 触发来源 | 调用方 | 特征 |
 |---|---|---|
 | **手动** | 界面「唤醒」按钮 → `app.js wakeNow()` | 直接 luna 调用 `wake`，发一次 |
-| **自动** | ActivityManager 开机 keepalive activity | 带 `fromPull:true`，周期循环并计数 |
+| **开机自动** | 后台服务启动时 `startBootAutosend()` | 服务开机常驻后自动调用，发一次 |
 
-### 自动触发（本次改动重点）
+### 开机自动发送（本次改动重点）
 
-- 后台服务启动时执行 `startBootAutosend()`。
-- 若配置里 `enabled` 和 `sendOnBoot` 都为 `true`，则调用 `armBootAuto()`：
-  - 通过 Luna 总线调用 `com.palm.activitymanager` 的 `create`，注册一个**持久（persist）后台 activity**（keepalive）。
-  - activity 的 `callback` 指向 `luna://com.woltv.wakeonlan.service/wake`，参数带 `fromPull:true`。
-  - 每次 TV 开机，系统恢复该持久 activity，并按 `sendIntervalSec` 周期触发 `wake`，从而自动发包。
-- 自动发送走 `incrementAndMaybeStop`：每次累加 `sendCount`，达到 `sendMaxCount` 上限后调用 `cancelKeepalive` 自动停止。
+- 后台服务通过 `onBoot:true` 在电视开机时自动常驻启动。
+- 服务启动时执行 `startBootAutosend()`。
+- 若配置里 `enabled` 和 `sendOnBoot` 都为 `true`，则直接调用 `sendMagicPacket` 发送一次魔术包。
+- 发送前走 `sendWOLWhenNetworkReady`：先确认电视已联网，未联网每 5 秒重查，最多等待 5 分钟。
+- **不再使用 ActivityManager 周期定时器**，逻辑已大幅简化：开机即发一次，无需手动打开应用。
 
 ## 四、本次改动：`onBoot: true`
 
@@ -80,8 +79,18 @@ wake 方法
 ```
 
 - 电视开机时系统**自动常驻**启动后台服务。
-- 服务一启动就执行 `startBootAutosend()` → 立即挂上 keepalive 闹钟。
-- **即使界面不启动，后台也会自动发包**。
+- 服务一启动就执行 `startBootAutosend()` → 直接发一次魔术包。
+- **即使界面不启动，后台也会自动发包。**
+
+### 补充改动：移除定时器，逻辑简化
+
+在加 `onBoot` 的同时，移除了原来基于 ActivityManager 周期定时器（keepalive activity）的复杂逻辑，改为「**服务开机启动后直接等网络就绪发一次魔术包**」：
+
+- 删除了 `armBootAuto` / `cancelKeepalive` / `setBootAuto` / `incrementAndMaybeStop` 及 keepalive activity 相关代码。
+- `startBootAutosend` 改为：判断 `enabled` 和 `sendOnBoot` 开关 → 调用 `sendMagicPacket`（内含 `sendWOLWhenNetworkReady` 等网络就绪，5 分钟超时）→ 发一次。
+- `wake` 方法去掉 `fromPull` 分支，手动与开机自动统一走同一发送逻辑。
+- 移除了配置里的定时器字段：`sendIntervalSec`、`sendMaxCount`、`sendCount`，对应界面控件同步删除。
+- 服务状态 `bootAuto` 简化为 `{ sent, error, lastSend }`，界面只显示开机自动发送的结果。
 
 ### 生效条件
 
@@ -100,9 +109,8 @@ wake 方法
 | `ip` | `255.255.255.255` | 目标 IP（默认全网广播） |
 | `port` | `9` | WOL 端口 |
 | `broadcast` | `true` | 是否广播方式发送 |
-| `sendIntervalSec` | `1` | 自动发送间隔（秒） |
-| `sendMaxCount` | `100` | 自动发送最大次数 |
-| `sendCount` | `0` | 已发送次数（自动累加） |
+
+> 说明：早期版本的 `sendIntervalSec`、`sendMaxCount`、`sendCount`（定时器相关）已在简化逻辑时移除。
 
 ## 六、后台服务暴露的方法（services.json）
 
@@ -136,8 +144,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy-wakeonlan.ps1
 
 1. 电视彻底断电重启。
 2. **不要手动打开应用**。
-3. 等待数秒（到网络就绪 + 间隔时间），观察目标电脑是否被唤醒。
-4. 若被唤醒，说明 `onBoot` 生效、keepalive 闹钟已随服务开机自动挂上。
+3. 等待网络就绪（最多 5 分钟）后，观察目标电脑是否被唤醒。
+4. 若被唤醒，说明 `onBoot` 生效、后台服务已随开机自动启动并发出魔术包。
 
 ## 九、其他说明
 

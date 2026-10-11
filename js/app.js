@@ -10,8 +10,6 @@
         mac: document.getElementById('mac'),
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
-        sendInterval: document.getElementById('sendInterval'),
-        sendMaxCount: document.getElementById('sendMaxCount'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
         swEnabled: document.getElementById('swEnabled'),
@@ -246,8 +244,6 @@
                 els.mac.value = c.mac || '';
                 els.ip.value = c.ip || '255.255.255.255';
                 els.port.value = c.port || 9;
-                els.sendInterval.value = c.sendIntervalSec || 1;
-                els.sendMaxCount.value = c.sendMaxCount || 100;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
                 ensureMacDefault();
@@ -258,8 +254,6 @@
                 els.mac.value = DEFAULT_MAC;
                 els.ip.value = '255.255.255.255';
                 els.port.value = 9;
-                els.sendInterval.value = 1;
-                els.sendMaxCount.value = 100;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
                 rebuildDeviceList([], null);
@@ -272,8 +266,6 @@
             mac: els.mac.value.trim(),
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
-            sendIntervalSec: parseInt(els.sendInterval.value, 10) || 1,
-            sendMaxCount: parseInt(els.sendMaxCount.value, 10) || 100,
             enabled: els.enabled.checked,
             sendOnBoot: els.sendOnBoot.checked
         };
@@ -284,36 +276,16 @@
             mac.replace(/[^0-9a-fA-F]/g, '').length === 12;
     }
 
-    function bootAutoTxt(ba) {
+    function bootStatusTxt(ba) {
         if (!ba) { return ''; }
-        var t = ba.triggers || {};
-        var keys = ['pull'];
-        var armedCount = 0;
-        var detail = [];
-        for (var i = 0; i < keys.length; i++) {
-            var st = t[keys[i]];
-            if (st && st.armed) {
-                armedCount++;
-                detail.push(keys[i]);
-            }
-        }
-        if (ba.armed) {
-            return '，开机自启已启用 ✓（触发源 ' + armedCount + '/' + keys.length +
-                '：' + (detail.join('/') || '无') + '）';
-        }
-        var s = '，⚠ 开机自启启用失败';
+        var m = {
+            sent: '开机自动发送成功 ✓',
+            error: '开机自动发送失败',
+            none: '开机自动发送未触发'
+        };
+        var s = '，' + (m[ba.lastSend] || ba.lastSend);
         if (ba.error) { s += '（' + ba.error + '）'; }
         return s;
-    }
-
-    function lastWolTxt(ba) {
-        if (!ba || !ba.armed) { return ''; }
-        var m = {
-            sent: '持续发送中 ✓',
-            error: '发送失败',
-            none: '尚未发送'
-        };
-        return '；发送状态：' + (m[ba.lastWol] || ba.lastWol);
     }
 
     function saveConfig() {
@@ -325,8 +297,7 @@
         setStatus('保存中…');
         callService('setConfig', cfg)
             .then(function (res) {
-                setStatus('已保存 ✓' + bootAutoTxt(res && res.bootAuto) +
-            lastWolTxt(res && res.bootAuto), 'ok');
+                setStatus('已保存 ✓' + bootStatusTxt(res && res.bootAuto), 'ok');
             })
             .catch(showError);
     }
@@ -360,7 +331,7 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.sendInterval, els.sendMaxCount,
+            els.swEnabled, els.swSendOnBoot,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -388,10 +359,10 @@
     }
 
     function isEditableInput(el) {
-        return el && (el === els.mac || el === els.ip || el === els.port || el === els.sendInterval || el === els.sendMaxCount);
+        return el && (el === els.mac || el === els.ip || el === els.port);
     }
 
-    ['mac', 'ip', 'port', 'sendInterval', 'sendMaxCount'].forEach(function (key) {
+    ['mac', 'ip', 'port'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true;
         });
@@ -465,8 +436,7 @@
     callService('getStatus', {}, 6000)
         .then(function (res) {
             setStatus('后台服务正常' +
-                bootAutoTxt(res && res.bootAuto) +
-                lastWolTxt(res && res.bootAuto) + '。', 'ok');
+                bootStatusTxt(res && res.bootAuto) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');
