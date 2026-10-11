@@ -23,7 +23,6 @@
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
         sendInterval: document.getElementById('sendInterval'),
-        pullInterval: document.getElementById('pullInterval'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
         logForward: document.getElementById('logForward'),
@@ -277,7 +276,6 @@
                 els.ip.value = c.ip || '255.255.255.255';
                 els.port.value = c.port || 9;
                 els.sendInterval.value = c.sendIntervalSec || 1;
-                els.pullInterval.value = c.pullIntervalSec || 20;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
                 els.logForward.checked = c.logForward === true;
@@ -293,7 +291,6 @@
                 els.ip.value = '255.255.255.255';
                 els.port.value = 9;
                 els.sendInterval.value = 1;
-                els.pullInterval.value = 20;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
                 els.logForward.checked = false;
@@ -310,7 +307,6 @@
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
             sendIntervalSec: parseInt(els.sendInterval.value, 10) || 1,
-            pullIntervalSec: parseInt(els.pullInterval.value, 10) || 20,
             enabled: els.enabled.checked,
             sendOnBoot: els.sendOnBoot.checked,
             logForward: els.logForward.checked,
@@ -326,9 +322,9 @@
 
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
-        // 触发源（net）+ 周期拉起(pull)：成功 X/2。
+        // 触发源（net）。
         var t = ba.triggers || {};
-        var keys = ['net', 'pull'];
+        var keys = ['net'];
         var armedCount = 0;
         var detail = [];
         for (var i = 0; i < keys.length; i++) {
@@ -418,7 +414,7 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.sendInterval, els.pullInterval,
+            els.swEnabled, els.swSendOnBoot, els.sendInterval,
             els.swLogForward, els.logHost, els.logPort,
             els.save, els.exit, els.wake
         ];
@@ -456,10 +452,10 @@
     function isEditableInput(el) {
         return el && (el === els.mac || el === els.ip || el === els.port ||
             el === els.logHost || el === els.logPort ||
-            el === els.sendInterval || el === els.pullInterval);
+            el === els.sendInterval);
     }
 
-    ['mac', 'ip', 'port', 'logHost', 'logPort', 'sendInterval', 'pullInterval'].forEach(function (key) {
+    ['mac', 'ip', 'port', 'logHost', 'logPort', 'sendInterval'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true; // 结束编辑/移开焦点后再次锁定
         });

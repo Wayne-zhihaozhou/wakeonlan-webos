@@ -66,10 +66,6 @@ var DEFAULT_CONFIG = {
     // 发送节奏：服务进程存活期间，每 sendIntervalSec 秒持续发送一次魔术包
     // （死循环，不依赖任何触发信号），确保「电视一直发」。默认 1 秒。
     sendIntervalSec: 1,
-    // 拉起节奏：持久化周期 Activity 每 pullIntervalSec 秒主动拉起本服务一次。
-    // 这是「开机后服务没被拉起」的根治手段——无论电视开机/唤醒/快速启动，
-    // 周期 Activity 都会定时把服务拉起来，不依赖 powerState/屏幕触发器。
-    pullIntervalSec: 20,
     // 日志转发：服务每打一行 console.log 就通过 UDP 推到局域网内电脑的
     // logHost:logPort，方便在电脑上看日志而不是在电视上翻。默认关闭。
     logForward: false,      // 是否把服务日志转发到电脑
@@ -110,7 +106,7 @@ var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: 
  * 已删除。唯一可武装的是 connectionmanager/getStatus（网络状态）：
  *   - net  : com.webos.service.connectionmanager/getStatus  冷开机时网络从无到有的变化，
  *            作为「彻底断电/完全关机再开机」的兜底（此时网络是就绪的最可靠信号）。
- * 该 Activity 触发会拉起服务并调用 wake。服务常驻后由周期拉起(pull) +
+ * 该 Activity 触发会拉起服务并调用 wake。服务常驻后由
  * screenWatch / powerWatch 看护负责「短待机唤醒」的检测。
  */
 var BOOT_TRIGGERS = [
@@ -122,13 +118,6 @@ var BOOT_TRIGGERS = [
         desc: 'Network ready after cold boot'
     }
 ];
-
-// 常驻 Activity：让服务进程被 Activity Manager 持续持有而不退出。
-// 方向 1 的核心——服务被 net 触发器拉起后，通过 adopt 这个无触发器、start:true
-// 的持久化后台 Activity 成为其 parent，从而保持进程常驻；进程存活期间
-// startPowerWatch 直连订阅的 tvpower/powerState 一直监听，待机唤醒时能抓到
-// Standby→Active 边沿并触发发送（绕开 AM 触发器对 tvpower 的 ACG 限制）。
-var KEEPALIVE_ACTIVITY_NAME = BOOT_ACTIVITY_NAME + '.keepalive';
 
 /* ------------------------------------------------------------------ *
  *  Direct powerState watch（待机唤醒兜底 + 诊断）
@@ -399,20 +388,6 @@ function startScreenPoll() {
 }
 
 /* ------------------------------------------------------------------ *
- *  周期拉起（服务常驻 & 死循环拉起）—— 根治「开机不拉起」
- *  ------------------------------------------------------------------ *
- *  webOS 的第三方 JS 服务进程是懒启动的：只有 (a) 有总线客户端调用它，或
- *  (b) Activity Manager 拉起它，进程才会起来。用户实测遥控开机（短待机/
- *  快速启动）后服务没被拉起、powerState/屏幕触发器都不触发——这是病根。
- *
- *  方案：在 setBootAuto() 中武装一个【带周期 schedule 的持久化 Activity】，
- *  它不依赖任何电源/屏幕信号，而是每 pullIntervalSec 秒主动调用本服务的
- *  `wake` 方法（拉起进程并启动持续发送循环），并 adopt 使其常驻。等价于
- *  系统层的「死循环」——电视只要开机，无论处于什么电源状态，服务都会在几秒
- *  内被拉起来并持续发送魔术包，先保证电脑一定能被唤醒。
- * ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ *
  *  Config store
  *  ------------------------------------------------------------------ *
  *  Primary persistence is DB8 (luna://com.palm.db). But DB calls can hang
@@ -469,8 +444,6 @@ function normalizeConfig(c) {
         broadcast: c ? c.broadcast !== false : true,
         sendIntervalSec: (c && typeof c.sendIntervalSec === 'number' && c.sendIntervalSec >= 1)
             ? c.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec,
-        pullIntervalSec: (c && typeof c.pullIntervalSec === 'number' && c.pullIntervalSec >= 5)
-            ? c.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec,
         logForward: c ? c.logForward !== false : false,
         logHost: (c && c.logHost) || DEFAULT_CONFIG.logHost,
         logPort: (c && typeof c.logPort === 'number') ? c.logPort : DEFAULT_CONFIG.logPort
@@ -553,8 +526,6 @@ function saveConfig(cfg, cb) {
         obj.broadcast = cfg.broadcast !== false;
         obj.sendIntervalSec = (typeof cfg.sendIntervalSec === 'number' && cfg.sendIntervalSec >= 1)
             ? cfg.sendIntervalSec : DEFAULT_CONFIG.sendIntervalSec;
-        obj.pullIntervalSec = (typeof cfg.pullIntervalSec === 'number' && cfg.pullIntervalSec >= 5)
-            ? cfg.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec;
         obj.logForward = cfg.logForward !== false;
         obj.logHost = (cfg.logHost || DEFAULT_CONFIG.logHost).toString();
         obj.logPort = typeof cfg.logPort === 'number' ? cfg.logPort : DEFAULT_CONFIG.logPort;
@@ -605,9 +576,8 @@ function saveConfig(cfg, cb) {
 function setBootAuto(enabled, cb) {
     var done = cb || function () {};
     if (!enabled) {
-        // 取消所有触发源对应的 Activity + 常驻 Activity。
+        // 取消所有触发源对应的 Activity。
         var cancelNames = BOOT_TRIGGERS.map(function (t) { return t.name; });
-        cancelNames.push(KEEPALIVE_ACTIVITY_NAME);
         var pendingCancels = cancelNames.length;
         function finishCancel() {
             bootAutoState.armed = false;
@@ -625,9 +595,8 @@ function setBootAuto(enabled, cb) {
         return;
     }
 
-    // 为每个触发源逐个武装 + 武装周期拉起 Activity；记录每个的结果，全部完成后回填总状态。
-    var pullKey = 'pull';
-    var remaining = BOOT_TRIGGERS.length + 1; // +1 是周期拉起 Activity
+    // 为每个触发源逐个武装；记录每个的结果，全部完成后回填总状态。
+    var remaining = BOOT_TRIGGERS.length;
     var anyArmed = false;
     var lastError = '';
 
@@ -636,8 +605,7 @@ function setBootAuto(enabled, cb) {
         bootAutoState.armed = anyArmed;
         bootAutoState.error = anyArmed ? '' : (lastError || 'all triggers failed');
         console.log('wol: boot auto-launch ' +
-            (anyArmed ? 'ARMED (triggers ' + (BOOT_TRIGGERS.length - countFailed()) + '/' + BOOT_TRIGGERS.length +
-                        ' + pull ' + (bootAutoState.triggers[pullKey] && bootAutoState.triggers[pullKey].armed ? 'OK' : 'FAIL') + ')' :
+            (anyArmed ? 'ARMED (triggers ' + (BOOT_TRIGGERS.length - countFailed()) + '/' + BOOT_TRIGGERS.length + ')' :
                         'FAILED (all: ' + bootAutoState.error + ')'));
         done(anyArmed ? null : new Error(bootAutoState.error));
     }
@@ -650,45 +618,6 @@ function setBootAuto(enabled, cb) {
         }
         return n;
     }
-
-    // 周期拉起 Activity：不依赖任何电源/屏幕信号，每 pullIntervalSec 秒主动拉起
-    // 本服务（回调 wake -> 拉起进程并启动持续发送循环）。这是「开机不拉起」的
-    // 根治手段。precise:true 表示不使用智能对齐间隔，按精确 interval 触发。
-    var pullInterval = (configCache && typeof configCache.pullIntervalSec === 'number')
-        ? configCache.pullIntervalSec : DEFAULT_CONFIG.pullIntervalSec;
-    if (pullInterval < 5) { pullInterval = 5; }
-    lunaCall(AM_URI, 'create', {
-        activity: {
-            name: KEEPALIVE_ACTIVITY_NAME,
-            description: 'Periodically pull up WOL service to send magic packets on every TV power-on',
-            type: { background: true, persist: true },
-            schedule: { interval: pullInterval + 's', precise: true },
-            callback: { method: 'luna://com.woltv.wakeonlan.service/wake', params: { fromPull: true, source: pullKey } }
-        },
-        replace: true,
-        start: true,
-        subscribe: true
-    }, function (res) {
-        var ok = !!(res && res.returnValue);
-        var pullAid = res && res.activityId;
-        bootAutoState.triggers[pullKey] = {
-            armed: ok,
-            error: ok ? '' : ((res && (res.errorText || res.error)) || 'pull activity create failed')
-        };
-        if (ok) { anyArmed = true; } else { lastError = bootAutoState.triggers[pullKey].error; }
-        console.log('wol: pull[' + pullKey + '] ' +
-            (ok ? 'ARMED (every ' + pullInterval + 's)' : 'FAILED (' + bootAutoState.triggers[pullKey].error + ')'));
-        // 立即 adopt 该周期 Activity：使本服务进程成为其 parent 而常驻，这样
-        // 持续发送循环在两次拉起之间不会断（进程不退出）。
-        if (ok && pullAid) {
-            lunaCall(AM_URI, 'adopt', { activityId: pullAid, wait: false, subscribe: true }, function (res2) {
-                console.log('wol: pull adopt ' +
-                    ((res2 && res2.returnValue) ? 'OK (service resident)' : 'FAILED (' + (res2 && (res2.errorText || res2.error)) + ')'));
-            }, 6000);
-        }
-        remaining--;
-        maybeFinish();
-    }, 6000);
 
     BOOT_TRIGGERS.forEach(function (trg) {
         lunaCall(AM_URI, 'create', {
@@ -1011,11 +940,11 @@ function sendMagicPacket(cfg, cb) {
  *  Service entry point: 持续发送（死循环）
  * ------------------------------------------------------------------ *
  *  只要服务进程存活，就【一直发魔术包】，不做任何检测、不设窗口、永不自动停止。
- *  每 sendIntervalSec 秒发一次（默认 1 秒），配合周期拉起 Activity（pull 触发器）
- *  保证：电视一开机服务就被拉起来，起来后立刻持续发——彻底绕开 powerState /
- *  屏幕触发器「短待机不触发」的问题，先保证电脑一定能被唤醒。
+ *  每 sendIntervalSec 秒发一次（默认 1 秒）。电视开机后服务被 AM 触发器拉起，
+ *  起来后立刻持续发——彻底绕开 powerState / 屏幕触发器「短待机不触发」的问题，
+ *  先保证电脑一定能被唤醒。
  *
- *  进程级防抖 bootLoopRunning：服务被周期 Activity / AM 触发器反复拉起时，每次
+ *  进程级防抖 bootLoopRunning：服务被 AM 触发器反复拉起时，每次
  *  service registered 都会重新走 startBootAutosend。若发送循环已在本进程跑着，
  *  就跳过，避免重复起循环。
  * ------------------------------------------------------------------ */
@@ -1032,18 +961,16 @@ function startBootAutosend() {
                 sendCfg = normalizeConfig(res.results[0]);
                 configCache = JSON.parse(JSON.stringify(sendCfg));
             }
-            // 进程级防抖：电视开机后周期 Activity / AM 触发器可能把本服务拉起
-            // 多次（每次 service registered 都会再跑 startBootAutosend）。若发送
-            // 循环已在本进程跑着，就忽略这次，避免重复从头发送 / 反复重建
-            // Activity 造成自触发循环。
+            // 进程级防抖：电视开机后 AM 触发器可能把本服务拉起多次（每次
+            // service registered 都会再跑 startBootAutosend）。若发送循环已在
+            // 本进程跑着，就忽略这次，避免重复从头发送 / 反复重建 Activity
+            // 造成自触发循环。
             if (bootLoopRunning) {
                 console.log('wol: continuous loop already running in this process; skip re-arm');
                 return;
             }
-            // Re-arm the persistent pull/trigger Activities to match stored config.
+            // Re-arm the persistent trigger Activities to match stored config.
             // (replace:true makes this idempotent, and it self-heals if lost.)
-            // 周期拉起 Activity 已并入 setBootAuto：只要启用，无论电源/屏幕信号，
-            // 都会每 pullIntervalSec 秒定时拉起本服务。
             setBootAuto(!!(sendCfg.enabled && sendCfg.sendOnBoot), function () {});
             runContinuousSendLoop(sendCfg);
         }, 4000);
@@ -1105,10 +1032,8 @@ try {
     console.log('wol: powerState watch startup error: ' + e);
 }
 
-// 常驻与周期拉起：持久化周期 Activity（并入 setBootAuto 武装）会在电视开机后
-// 每 pullIntervalSec 秒主动拉起本服务，并 adopt 使其常驻；持续发送循环保证
-// 一直发魔术包。屏幕/电源看护（startPowerWatch）作为冗余补充。
-// （setBootAuto 已在 startBootAutosend 中被调用并创建该周期 Activity。）
+// 持续发送循环 + 屏幕/电源看护（startPowerWatch）负责开机/待机唤醒时一直发魔术包。
+// （setBootAuto 已在 startBootAutosend 中被调用并武装各触发源 Activity。）
 
 /* ------------------------------------------------------------------ *
  *  Bus methods used by the front-end app
@@ -1122,14 +1047,7 @@ service.register('wake', function (message) {
         if (p.port) { cfg.port = p.port; }
         if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
-        // 被周期拉起 Activity 回调（fromPull）时：本服务刚被拉起来，务必启动
-        // 持续发送循环（死循环），确保之后一直发。
-        if (p.fromPull && !bootLoopRunning) {
-            console.log('wol: pulled up by periodic activity; starting continuous loop');
-            if (cfg.enabled && cfg.sendOnBoot) { runContinuousSendLoop(cfg); }
-        }
-
-        // 手动触发或任一开机触发器回调（fromBoot/fromPull）一律直接发一次魔术包，
+        // 手动触发或任一开机触发器回调（fromBoot）一律直接发一次魔术包，
         // 不做电源/网络检测——优先保证唤醒成功。
         sendMagicPacket(cfg, function (sendErr) {
             if (sendErr) {
@@ -1137,7 +1055,7 @@ service.register('wake', function (message) {
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
                 bootAutoState.lastWol = 'sent';
-                var src = p.fromPull ? ' (fromPull)' : (p.fromBoot ? ' (fromBoot)' : '');
+                var src = p.fromBoot ? ' (fromBoot)' : '';
                 console.log('wol: wake sent -> ' + cfg.mac + src);
                 message.respond({ returnValue: true, sent: true });
             }
