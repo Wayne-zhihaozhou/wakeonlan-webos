@@ -326,9 +326,9 @@
 
     function bootAutoTxt(ba) {
         if (!ba) { return ''; }
-        // 多触发源（tvpower/net/display/screen）+ 周期拉起(pull)：成功 X/5。
+        // 触发源（net）+ 周期拉起(pull)：成功 X/2。
         var t = ba.triggers || {};
-        var keys = ['tvpower', 'net', 'display', 'screen', 'pull'];
+        var keys = ['net', 'pull'];
         var armedCount = 0;
         var detail = [];
         for (var i = 0; i < keys.length; i++) {

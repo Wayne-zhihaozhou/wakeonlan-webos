@@ -2,13 +2,12 @@
  * Wake on LAN service for webOS TV
  * ---------------------------------
  * Runs as a Node.js JS Service in the background on the TV.
- * - 开机自动唤醒：电视开机后（服务被 Activity Manager 的多条件触发器拉起），
+ * - 开机自动唤醒：电视开机后（服务被 Activity Manager 的触发器拉起），
  *   在 90 秒窗口内每 2 秒循环发送一次 Wake-on-LAN 魔术包（UDP），确保电脑收到。
- *   多触发源（tvpower/powerState、connectionmanager/getStatus、displayStatus、
- *   screenState）任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性。
- *   关键：常驻服务另设【屏幕状态看护 + 轮询看护】，靠「屏幕灭→亮」边沿触发——
- *   即使开启「即时开机 / Quick Start+」导致 powerState 在短待机时不变化，屏幕也
- *   一定在每次开机时由灭变亮，因此【每次开机（含短待机唤醒）】都能发送魔术包。
+ *   触发源为 connectionmanager/getStatus（tvpower/displayStatus/screenState 对第三方
+ *   服务无 ACG 权限、无法武装，已删除）。关键：常驻服务另设【屏幕状态看护 + 轮询看护】，
+ *   靠「屏幕灭→亮」边沿触发——即使开启「即时开机 / Quick Start+」导致 powerState 在短待机时
+ *   不变化，屏幕也一定在每次开机时由灭变亮，因此【每次开机（含短待机唤醒）】都能发送魔术包。
  * - Registers bus methods used by the front-end app:
  *     wake       -> send a magic packet now
  *     getConfig  -> return stored config
@@ -105,51 +104,22 @@ var BOOT_ACTIVITY_NAME = 'com.woltv.wakeonlan.bootwol';
 var bootAutoState = { armed: false, error: '', lastWol: 'none', lastPowerState: '', resumeFires: 0, screenOnFires: 0, triggers: {} };
 
 /*
- * 开机触发源列表（多条件、任一触发即可唤醒，提高「电视屏幕亮起」时的触发稳定性）。
- * 每个触发源注册为一个独立的持久化 Activity，全部回调到同一个 `wake` 方法：
- *   - tvpower  : com.webos.service.tvpower/powerState  电源状态变化（待机→开机瞬间 fire），
- *                最贴合「遥控器待机开电视」的实际用法。
- *   - net      : com.webos.service.connectionmanager/getStatus  冷开机时网络从无到有的变化，
- *                作为「彻底断电/完全关机再开机」的兜底（此时网络是就绪的最可靠信号）。
- *   - display  : com.webos.service.systemservice/displayStatus  屏幕显示状态变化，
- *                直接反映「屏幕亮起」这个时刻。
- *   - screen   : com.webos.service.tvpower/screenState  屏幕亮/灭变化。即使开启
- *                「即时开机/Quick Start+」导致 powerState 在短待机时不变化，屏幕
- *                也一定会在每次开机时由灭变亮，因此这是【每次开机】都可靠的冷启动源。
- * 任一 Activity 触发都会拉起服务并调用 wake，多个触发源互为冗余——只要有一个可用就能唤醒，
- * 显著降低「单一触发器在特定固件/场景下不触发」导致电脑不醒的风险。
- * 注意：displayStatus / connectionmanager / screenState 等是否对第三方 Activity 可订阅
- * 取决于固件 ACG 权限，需真机验证；个别源武装失败会记录到 bootAutoState.triggers，
- * 不影响其它成功者。服务常驻后由 screenWatch + 轮询看护负责「短待机唤醒」的检测。
+ * 开机触发源列表。
+ * 真机实测（2026）：第三方服务对 tvpower/powerState、systemservice/displayStatus、
+ * tvpower/screenState 均无 ACG 权限，这些触发器武装必然失败（trigger[...] FAILED），
+ * 已删除。唯一可武装的是 connectionmanager/getStatus（网络状态）：
+ *   - net  : com.webos.service.connectionmanager/getStatus  冷开机时网络从无到有的变化，
+ *            作为「彻底断电/完全关机再开机」的兜底（此时网络是就绪的最可靠信号）。
+ * 该 Activity 触发会拉起服务并调用 wake。服务常驻后由周期拉起(pull) +
+ * screenWatch / powerWatch 看护负责「短待机唤醒」的检测。
  */
 var BOOT_TRIGGERS = [
-    {
-        key: 'tvpower',
-        name: BOOT_ACTIVITY_NAME + '.tvpower',
-        method: 'luna://com.webos.service.tvpower/powerState',
-        params: { subscribe: true },
-        desc: 'TV power state change (standby->on)'
-    },
     {
         key: 'net',
         name: BOOT_ACTIVITY_NAME + '.net',
         method: 'luna://com.webos.service.connectionmanager/getStatus',
         params: { subscribe: true },
         desc: 'Network ready after cold boot'
-    },
-    {
-        key: 'display',
-        name: BOOT_ACTIVITY_NAME + '.display',
-        method: 'luna://com.webos.service.systemservice/displayStatus',
-        params: { subscribe: true },
-        desc: 'Screen display status change (screen on)'
-    },
-    {
-        key: 'screen',
-        name: BOOT_ACTIVITY_NAME + '.screen',
-        method: 'luna://com.webos.service.tvpower/screenState',
-        params: { subscribe: true },
-        desc: 'TV screen state change (screen on)'
     }
 ];
 
