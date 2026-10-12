@@ -253,7 +253,7 @@
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
                 els.triggerNetwork.checked = c.triggerOnNetwork === true;
                 els.triggerTimer.checked = c.triggerTimer === true;
-                els.timerInterval.value = c.timerInterval || 30;
+                els.timerInterval.value = c.timerInterval || 3;
                 ensureMacDefault();
                 rebuildDeviceList([], null);
                 setStatus('已加载设置。可点「扫描设备」选择目标。', 'ok');
@@ -266,7 +266,7 @@
                 els.sendOnBoot.checked = true;
                 els.triggerNetwork.checked = true;
                 els.triggerTimer.checked = true;
-                els.timerInterval.value = 30;
+                els.timerInterval.value = 3;
                 rebuildDeviceList([], null);
                 setStatus('已使用默认目标（' + DEFAULT_MAC + '），可直接保存。', '');
             });
@@ -281,7 +281,7 @@
             sendOnBoot: els.sendOnBoot.checked,
             triggerOnNetwork: els.triggerNetwork.checked,
             triggerTimer: els.triggerTimer.checked,
-            timerInterval: parseInt(els.timerInterval.value, 10) || 30
+            timerInterval: parseInt(els.timerInterval.value, 10) || 3
         };
     }
 

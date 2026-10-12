@@ -11,12 +11,16 @@ var CONN_URI = 'luna://com.webos.service.connectionmanager';
 var ACT_URI = 'luna://com.palm.activitymanager';
 var ACT_NAME = 'com.woltv.wakeonlan.wake-loop';
 
+// 配置结构版本：v2 起网络触发与定时重发默认开启。
+// 用于迁移旧版（v1 及更早，字段保存为 false）的已持久化配置。
+var SCHEMA_VERSION = 2;
+
 var DEFAULT_CONFIG = {
     enabled: true,
     sendOnBoot: true,
     triggerOnNetwork: true,
     triggerTimer: true,
-    timerInterval: 30,
+    timerInterval: 3,
     mac: 'CC:28:AA:A7:B4:1F',
     ip: '255.255.255.255',
     port: 9,
@@ -65,12 +69,16 @@ function ensureKind(cb) {
 }
 
 function normalizeConfig(c) {
+    // 旧版本配置（无 version 或 version < SCHEMA_VERSION）需要迁移：
+    // 网络触发/定时重发默认值改为开启，覆盖旧版保存的 false。
+    var legacy = !c || c.version !== SCHEMA_VERSION;
     return {
         _id: c && c._id,
+        version: SCHEMA_VERSION,
         enabled: c ? c.enabled !== false : true,
         sendOnBoot: c ? c.sendOnBoot !== false : true,
-        triggerOnNetwork: c ? c.triggerOnNetwork === true : true,
-        triggerTimer: c ? c.triggerTimer === true : true,
+        triggerOnNetwork: c ? (legacy ? true : c.triggerOnNetwork === true) : true,
+        triggerTimer: c ? (legacy ? true : c.triggerTimer === true) : true,
         timerInterval: (c && typeof c.timerInterval === 'number') ? c.timerInterval : DEFAULT_CONFIG.timerInterval,
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
@@ -82,12 +90,20 @@ function normalizeConfig(c) {
 function loadConfig(cb) {
     if (configCache) { cb(null, JSON.parse(JSON.stringify(configCache))); return; }
     dbCall('find', { query: { from: KIND } }, function (res) {
+        var raw = null;
         if (res && res.returnValue && res.results && res.results.length > 0) {
-            configCache = normalizeConfig(res.results[0]);
-        } else {
-            configCache = normalizeConfig(null);
+            raw = res.results[0];
         }
-        cb(null, JSON.parse(JSON.stringify(configCache)));
+        var normalized = normalizeConfig(raw);
+        configCache = normalized;
+        if (raw && raw.version !== SCHEMA_VERSION) {
+            // 旧版配置迁移：把新默认值写回数据库，仅此一次，之后尊重用户改动
+            saveConfig(normalized, function () {
+                cb(null, JSON.parse(JSON.stringify(configCache)));
+            });
+        } else {
+            cb(null, JSON.parse(JSON.stringify(configCache)));
+        }
     });
 }
 
@@ -96,6 +112,7 @@ function saveConfig(cfg, cb) {
         var obj = {};
         if (existing && existing._id) { obj._id = existing._id; }
         obj._kind = KIND;
+        obj.version = SCHEMA_VERSION;
         obj.enabled = cfg.enabled !== false;
         obj.sendOnBoot = cfg.sendOnBoot !== false;
         obj.triggerOnNetwork = cfg.triggerOnNetwork === true;
@@ -347,7 +364,7 @@ function stopNetworkTrigger() {
 }
 
 function formatInterval(seconds) {
-    var s = parseInt(seconds, 10) || 30;
+    var s = parseInt(seconds, 10) || 3;
     if (s < 1) { s = 1; }
     var d = Math.floor(s / 86400);
     var h = Math.floor((s % 86400) / 3600);
@@ -364,7 +381,7 @@ function formatInterval(seconds) {
 function startTimerTrigger(cfg) {
     stopTimerTrigger();
     if (!(cfg.enabled && cfg.triggerTimer)) { return; }
-    var seconds = parseInt(cfg.timerInterval, 10) || 30;
+    var seconds = parseInt(cfg.timerInterval, 10) || 3;
     var schedule = { interval: formatInterval(seconds) };
     if (seconds < 300) { schedule.precise = true; }
     lunaCall(ACT_URI, 'create', {
