@@ -295,10 +295,10 @@
     function timerStatusTxt(t) {
         if (!t) { return ''; }
         var m = {
-            sent: '持续发送已发送 ✓',
-            error: '持续发送失败',
-            sending: '持续发送发送中',
-            none: '持续发送未触发'
+            sent: '已发送一次 ✓',
+            error: '发送失败',
+            sending: '发送中',
+            none: '未触发'
         };
         var s = '，' + (m[t.lastSend] || t.lastSend);
         if (t.error) { s += '（' + t.error + '）'; }

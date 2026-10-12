@@ -338,29 +338,20 @@ function stopNetworkTrigger() {
     netTriggerState.active = false;
 }
 
-var sendLoopTimer = null;
-
 function startContinuousSend(cfg) {
     stopContinuousSend();
     if (!(cfg.enabled && cfg.triggerTimer)) { return; }
-    var seconds = parseInt(cfg.timerInterval, 10) || 3;
-    if (seconds < 1) { seconds = 1; }
     timerState.active = true;
     timerState.error = '';
-    sendLoopTimer = setInterval(function () {
-        sendWOL(cfg, function (err) {
-            timerState.lastSend = err ? 'error' : 'sent';
-            timerState.error = err ? (err.message || String(err)) : '';
-            recordSend(!err, err && err.message);
-        });
-    }, seconds * 1000);
+    sendWOL(cfg, function (err) {
+        timerState.lastSend = err ? 'error' : 'sent';
+        timerState.error = err ? (err.message || String(err)) : '';
+        recordSend(!err, err && err.message);
+        timerState.active = false;
+    });
 }
 
 function stopContinuousSend() {
-    if (sendLoopTimer) {
-        try { clearInterval(sendLoopTimer); } catch (e) { }
-        sendLoopTimer = null;
-    }
     timerState.active = false;
 }
 
