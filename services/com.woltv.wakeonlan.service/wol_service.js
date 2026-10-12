@@ -369,9 +369,7 @@ function ensurePersistActivity() {
                 params: {}
             }
         },
-        start: true,
-        replace: true,
-        subscribe: true
+        replace: true
     }, function (message) {
         var p = message && message.payload;
         if (!p || p.returnValue === false) {
