@@ -12,8 +12,10 @@
         port: document.getElementById('port'),
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
+        triggerNetwork: document.getElementById('triggerNetwork'),
         swEnabled: document.getElementById('swEnabled'),
         swSendOnBoot: document.getElementById('swSendOnBoot'),
+        swTriggerNetwork: document.getElementById('swTriggerNetwork'),
         save: document.getElementById('btnSave'),
         exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
@@ -246,6 +248,7 @@
                 els.port.value = c.port || 9;
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
+                els.triggerNetwork.checked = c.triggerOnNetwork === true;
                 ensureMacDefault();
                 rebuildDeviceList([], null);
                 setStatus('已加载设置。可点「扫描设备」选择目标。', 'ok');
@@ -256,6 +259,7 @@
                 els.port.value = 9;
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
+                els.triggerNetwork.checked = false;
                 rebuildDeviceList([], null);
                 setStatus('已使用默认目标（' + DEFAULT_MAC + '），可直接保存。', '');
             });
@@ -267,7 +271,8 @@
             ip: els.ip.value.trim() || '255.255.255.255',
             port: parseInt(els.port.value, 10) || 9,
             enabled: els.enabled.checked,
-            sendOnBoot: els.sendOnBoot.checked
+            sendOnBoot: els.sendOnBoot.checked,
+            triggerOnNetwork: els.triggerNetwork.checked
         };
     }
 
@@ -288,6 +293,20 @@
         return s;
     }
 
+    function netTriggerStatusTxt(nt) {
+        if (!nt) { return ''; }
+        var m = {
+            sent: '网络触发已发送 ✓',
+            error: '网络触发失败',
+            sending: '网络触发发送中',
+            none: '网络触发未触发'
+        };
+        var s = '，' + (m[nt.lastSend] || nt.lastSend);
+        if (!nt.active) { s += '（未启用）'; }
+        if (nt.error) { s += '（' + nt.error + '）'; }
+        return s;
+    }
+
     function saveConfig() {
         var cfg = readForm();
         if (!validMac(cfg.mac)) {
@@ -297,7 +316,8 @@
         setStatus('保存中…');
         callService('setConfig', cfg)
             .then(function (res) {
-                setStatus('已保存 ✓' + bootStatusTxt(res && res.bootAuto), 'ok');
+                setStatus('已保存 ✓' + bootStatusTxt(res && res.bootAuto) +
+                    netTriggerStatusTxt(res && res.netTrigger), 'ok');
             })
             .catch(showError);
     }
@@ -331,7 +351,7 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot,
+            els.swEnabled, els.swSendOnBoot, els.swTriggerNetwork,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -355,6 +375,7 @@
         if (!el) { return; }
         if (el === els.swEnabled) { els.enabled.checked = !els.enabled.checked; }
         else if (el === els.swSendOnBoot) { els.sendOnBoot.checked = !els.sendOnBoot.checked; }
+        else if (el === els.swTriggerNetwork) { els.triggerNetwork.checked = !els.triggerNetwork.checked; }
         else if (el.tagName === 'BUTTON') { el.click(); }
     }
 
@@ -436,7 +457,8 @@
     callService('getStatus', {}, 6000)
         .then(function (res) {
             setStatus('后台服务正常' +
-                bootStatusTxt(res && res.bootAuto) + '。', 'ok');
+                bootStatusTxt(res && res.bootAuto) +
+                netTriggerStatusTxt(res && res.netTrigger) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');

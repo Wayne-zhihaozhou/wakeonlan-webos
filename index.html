@@ -67,6 +67,16 @@
                     <span class="slider"></span>
                 </label>
             </div>
+            <div class="row switch-row">
+                <div class="field grow">
+                    <label>网络恢复时自动发送</label>
+                    <p class="hint">后台服务监听电视的网络连接状态。当网络从断开变为已连接（例如路由器重启、网线重插、Wi-Fi 重连）时，自动发送一次魔术包唤醒电脑。需保持后台服务运行。</p>
+                </div>
+                <label id="swTriggerNetwork" class="switch" tabindex="0">
+                    <input type="checkbox" id="triggerNetwork">
+                    <span class="slider"></span>
+                </label>
+            </div>
         </section>
 
         <section class="card actions">

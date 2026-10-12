@@ -7,10 +7,12 @@ var net = require('net');
 var SERVICE_NAME = 'com.woltv.wakeonlan.service';
 var DB_URI = 'luna://com.palm.db';
 var KIND = 'com.woltv.wakeonlan:1';
+var CONN_URI = 'luna://com.webos.service.connectionmanager';
 
 var DEFAULT_CONFIG = {
     enabled: true,
     sendOnBoot: true,
+    triggerOnNetwork: false,
     mac: 'CC:28:AA:A7:B4:1F',
     ip: '255.255.255.255',
     port: 9,
@@ -21,6 +23,10 @@ var service = new Service(SERVICE_NAME);
 var lastSend = { at: 0, ok: false, error: '' };
 
 var bootState = { error: '', lastSend: 'none' };
+var netTriggerState = { active: false, lastSend: 'none', error: '' };
+var netSub = null;
+var prevNetConnected = null;
+var keepAliveActivity = null;
 
 var configCache = null;
 
@@ -58,6 +64,7 @@ function normalizeConfig(c) {
         _id: c && c._id,
         enabled: c ? c.enabled !== false : true,
         sendOnBoot: c ? c.sendOnBoot !== false : true,
+        triggerOnNetwork: c ? c.triggerOnNetwork === true : false,
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
         port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
@@ -84,6 +91,7 @@ function saveConfig(cfg, cb) {
         obj._kind = KIND;
         obj.enabled = cfg.enabled !== false;
         obj.sendOnBoot = cfg.sendOnBoot !== false;
+        obj.triggerOnNetwork = cfg.triggerOnNetwork === true;
         obj.mac = (cfg.mac || DEFAULT_CONFIG.mac).toString();
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
@@ -265,21 +273,68 @@ function buildMagicPacket(mac) {
 var NET_CHECK_INTERVAL_MS = 5000;
 var NET_CHECK_TIMEOUT_MS = 5 * 60 * 1000;
 
+function isConnectedPayload(res) {
+    if (!res) { return false; }
+    var state = String(res.state || '').toLowerCase();
+    var inetState = String(res.internetConnectionState || '').toLowerCase();
+    return res.connected === true || res.connected === 'connected' ||
+        (res.wired && (res.wired.connected === true ||
+            String(res.wired.state || '').toLowerCase() === 'connected')) ||
+        (res.wifi && (res.wifi.connected === true ||
+            String(res.wifi.state || '').toLowerCase() === 'connected')) ||
+        state === 'connected' || state === 'ipv4' || state === 'ipv6' ||
+        inetState === 'connected';
+}
+
 function networkReady(cb) {
-    lunaCall('luna://com.webos.service.connectionmanager', 'getStatus', {}, function (res) {
-        if (!res || !res.returnValue) { cb(false); return; }
-        var state = String(res.state || '').toLowerCase();
-        var inetState = String(res.internetConnectionState || '').toLowerCase();
-        var ok =
-            res.connected === true || res.connected === 'connected' ||
-            (res.wired && (res.wired.connected === true ||
-                String(res.wired.state || '').toLowerCase() === 'connected')) ||
-            (res.wifi && (res.wifi.connected === true ||
-                String(res.wifi.state || '').toLowerCase() === 'connected')) ||
-            state === 'connected' || state === 'ipv4' || state === 'ipv6' ||
-            inetState === 'connected';
-        cb(ok);
+    lunaCall(CONN_URI, 'getStatus', {}, function (res) {
+        cb(isConnectedPayload(res));
     }, 3000);
+}
+
+function startNetworkTrigger(cfg) {
+    stopNetworkTrigger();
+    if (!(cfg.enabled && cfg.triggerOnNetwork)) { return; }
+    try {
+        service.activityManager.create('keepAlive', function (activity) {
+            keepAliveActivity = activity;
+        });
+    } catch (e) { }
+    try {
+        netSub = service.subscribe(CONN_URI + '/getStatus', { subscribe: true });
+        netSub.on('response', function (message) {
+            var payload = message && message.payload;
+            var connected = isConnectedPayload(payload);
+            if (prevNetConnected === false && connected) {
+                netTriggerState.lastSend = 'sending';
+                netTriggerState.error = '';
+                sendMagicPacket(cfg, function (sendErr) {
+                    netTriggerState.lastSend = sendErr ? 'error' : 'sent';
+                    netTriggerState.error = sendErr ? (sendErr.message || String(sendErr)) : '';
+                });
+            }
+            prevNetConnected = connected;
+            netTriggerState.active = true;
+        });
+        netSub.on('cancel', function () {
+            netTriggerState.active = false;
+        });
+    } catch (e) {
+        netTriggerState.active = false;
+    }
+}
+
+function stopNetworkTrigger() {
+    if (netSub) {
+        try { netSub.cancel(); } catch (e) { }
+        netSub = null;
+    }
+    if (keepAliveActivity) {
+        try { service.activityManager.complete(keepAliveActivity, function () { }); } catch (e) { }
+        keepAliveActivity = null;
+    }
+    prevNetConnected = null;
+    netTriggerState.active = false;
 }
 
 function sendWOLWhenNetworkReady(cfg, cb) {
@@ -367,6 +422,7 @@ function sendMagicPacket(cfg, cb) {
 function startBootAutosend() {
     loadConfig(function (err, cfg) {
         configCache = JSON.parse(JSON.stringify(cfg));
+        startNetworkTrigger(cfg);
         if (!(cfg.enabled && cfg.sendOnBoot)) { return; }
         sendMagicPacket(cfg, function (sendErr) {
             bootState.lastSend = sendErr ? 'error' : 'sent';
@@ -424,7 +480,8 @@ service.register('setConfig', function (message) {
             if (saveErr) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
-                message.respond({ returnValue: true, config: saved, bootAuto: bootState });
+                startNetworkTrigger(saved);
+                message.respond({ returnValue: true, config: saved, bootAuto: bootState, netTrigger: netTriggerState });
             }
         });
     } catch (e) {
@@ -436,7 +493,8 @@ service.register('getStatus', function (message) {
     message.respond({
         returnValue: true,
         lastSend: lastSend,
-        bootAuto: bootState
+        bootAuto: bootState,
+        netTrigger: netTriggerState
     });
 });
 
