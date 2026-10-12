@@ -10,11 +10,6 @@ var KIND = 'com.woltv.wakeonlan:1';
 var CONN_URI = 'luna://com.webos.service.connectionmanager';
 
 var FLAGS = {
-    enabled: true,
-    sendOnBoot: true,
-    triggerOnNetwork: true,
-    triggerTimer: true,
-    timerInterval: 3,
     broadcast: true
 };
 
@@ -26,13 +21,6 @@ var DEFAULT_CONFIG = {
 
 var service = new Service(SERVICE_NAME);
 var lastSend = { at: 0, ok: false, error: '' };
-
-var bootState = { error: '', lastSend: 'none' };
-var netTriggerState = { active: false, lastSend: 'none', error: '' };
-var netSub = null;
-var prevNetConnected = null;
-var keepAliveActivity = null;
-var timerState = { active: false, lastSend: 'none', error: '' };
 
 var configCache = null;
 
@@ -67,11 +55,6 @@ function ensureKind(cb) {
 
 function fullConfig(device) {
     var cfg = {
-        enabled: FLAGS.enabled,
-        sendOnBoot: FLAGS.sendOnBoot,
-        triggerOnNetwork: FLAGS.triggerOnNetwork,
-        triggerTimer: FLAGS.triggerTimer,
-        timerInterval: FLAGS.timerInterval,
         broadcast: FLAGS.broadcast
     };
     cfg.mac = (device && device.mac) || DEFAULT_CONFIG.mac;
@@ -293,68 +276,6 @@ function networkReady(cb) {
     }, 3000);
 }
 
-function startNetworkTrigger(cfg) {
-    stopNetworkTrigger();
-    if (!(cfg.enabled && cfg.triggerOnNetwork)) { return; }
-    try {
-        service.activityManager.create('keepAlive', function (activity) {
-            keepAliveActivity = activity;
-        });
-    } catch (e) { }
-    try {
-        netSub = service.subscribe(CONN_URI + '/getStatus', { subscribe: true });
-        netSub.on('response', function (message) {
-            var payload = message && message.payload;
-            var connected = isConnectedPayload(payload);
-            if (prevNetConnected === false && connected) {
-                netTriggerState.lastSend = 'sending';
-                netTriggerState.error = '';
-                sendMagicPacket(cfg, function (sendErr) {
-                    netTriggerState.lastSend = sendErr ? 'error' : 'sent';
-                    netTriggerState.error = sendErr ? (sendErr.message || String(sendErr)) : '';
-                });
-            }
-            prevNetConnected = connected;
-            netTriggerState.active = true;
-        });
-        netSub.on('cancel', function () {
-            netTriggerState.active = false;
-        });
-    } catch (e) {
-        netTriggerState.active = false;
-    }
-}
-
-function stopNetworkTrigger() {
-    if (netSub) {
-        try { netSub.cancel(); } catch (e) { }
-        netSub = null;
-    }
-    if (keepAliveActivity) {
-        try { service.activityManager.complete(keepAliveActivity, function () { }); } catch (e) { }
-        keepAliveActivity = null;
-    }
-    prevNetConnected = null;
-    netTriggerState.active = false;
-}
-
-function startContinuousSend(cfg) {
-    stopContinuousSend();
-    if (!(cfg.enabled && cfg.triggerTimer)) { return; }
-    timerState.active = true;
-    timerState.error = '';
-    sendWOL(cfg, function (err) {
-        timerState.lastSend = err ? 'error' : 'sent';
-        timerState.error = err ? (err.message || String(err)) : '';
-        recordSend(!err, err && err.message);
-        timerState.active = false;
-    });
-}
-
-function stopContinuousSend() {
-    timerState.active = false;
-}
-
 function sendWOLWhenNetworkReady(cfg, cb) {
     var deadline = Date.now() + NET_CHECK_TIMEOUT_MS;
     var done = false;
@@ -437,26 +358,12 @@ function sendMagicPacket(cfg, cb) {
     });
 }
 
-function startBootAutosend() {
-    loadConfig(function (err, cfg) {
-        configCache = JSON.parse(JSON.stringify(cfg));
-        startNetworkTrigger(cfg);
-        startContinuousSend(cfg);
-        if (!(cfg.enabled && cfg.sendOnBoot)) { return; }
-        sendMagicPacket(cfg, function (sendErr) {
-            bootState.lastSend = sendErr ? 'error' : 'sent';
-            bootState.error = sendErr ? (sendErr.message || String(sendErr)) : '';
-        });
-    });
-}
-
 function ensurePersistActivity() {
     service.call('luna://com.palm.activitymanager/create', {
         activity: {
             name: 'com.woltv.wakeonlan.service.persist',
-            description: 'Persistent watchdog to relaunch WOL service after cold boot',
+            description: 'Relaunch WOL service after cold boot',
             type: { persist: true, background: true },
-            schedule: { interval: '5m' },
             callback: {
                 method: 'luna://com.woltv.wakeonlan.service/wake',
                 params: {}
@@ -473,7 +380,6 @@ function ensurePersistActivity() {
     });
 }
 
-startBootAutosend();
 ensurePersistActivity();
 
 service.register('wake', function (message) {
@@ -485,12 +391,8 @@ service.register('wake', function (message) {
 
         function respond(sendErr) {
             if (sendErr) {
-                bootState.lastSend = 'error';
-                bootState.error = sendErr.message || String(sendErr);
                 message.respond({ returnValue: false, errorText: sendErr.message, errorCode: -1 });
             } else {
-                bootState.lastSend = 'sent';
-                bootState.error = '';
                 message.respond({ returnValue: true, sent: true });
             }
         }
@@ -522,9 +424,7 @@ service.register('setConfig', function (message) {
             if (saveErr) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
-                startNetworkTrigger(saved);
-                startContinuousSend(saved);
-                message.respond({ returnValue: true, config: saved, bootAuto: bootState, netTrigger: netTriggerState, timer: timerState });
+                message.respond({ returnValue: true, config: saved });
             }
         });
     } catch (e) {
@@ -535,10 +435,7 @@ service.register('setConfig', function (message) {
 service.register('getStatus', function (message) {
     message.respond({
         returnValue: true,
-        lastSend: lastSend,
-        bootAuto: bootState,
-        netTrigger: netTriggerState,
-        timer: timerState
+        lastSend: lastSend
     });
 });
 

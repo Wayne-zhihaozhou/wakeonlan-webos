@@ -267,44 +267,6 @@
             mac.replace(/[^0-9a-fA-F]/g, '').length === 12;
     }
 
-    function bootStatusTxt(ba) {
-        if (!ba) { return ''; }
-        var m = {
-            sent: '开机自动发送成功 ✓',
-            error: '开机自动发送失败',
-            none: '开机自动发送未触发'
-        };
-        var s = '，' + (m[ba.lastSend] || ba.lastSend);
-        if (ba.error) { s += '（' + ba.error + '）'; }
-        return s;
-    }
-
-    function netTriggerStatusTxt(nt) {
-        if (!nt) { return ''; }
-        var m = {
-            sent: '网络触发已发送 ✓',
-            error: '网络触发失败',
-            sending: '网络触发发送中',
-            none: '网络触发未触发'
-        };
-        var s = '，' + (m[nt.lastSend] || nt.lastSend);
-        if (nt.error) { s += '（' + nt.error + '）'; }
-        return s;
-    }
-
-    function timerStatusTxt(t) {
-        if (!t) { return ''; }
-        var m = {
-            sent: '已发送一次 ✓',
-            error: '发送失败',
-            sending: '发送中',
-            none: '未触发'
-        };
-        var s = '，' + (m[t.lastSend] || t.lastSend);
-        if (t.error) { s += '（' + t.error + '）'; }
-        return s;
-    }
-
     function saveConfig() {
         var cfg = readForm();
         if (!validMac(cfg.mac)) {
@@ -315,9 +277,7 @@
         callService('setConfig', cfg)
             .then(function (res) {
                 applyConfig(res && res.config);
-                setStatus('已保存 ✓' + bootStatusTxt(res && res.bootAuto) +
-                    netTriggerStatusTxt(res && res.netTrigger) +
-                    timerStatusTxt(res && res.timer), 'ok');
+                setStatus('已保存 ✓', 'ok');
             })
             .catch(showError);
     }
@@ -452,10 +412,7 @@
 
     callService('getStatus', {}, 6000)
         .then(function (res) {
-            setStatus('后台服务正常' +
-                bootStatusTxt(res && res.bootAuto) +
-                netTriggerStatusTxt(res && res.netTrigger) +
-                timerStatusTxt(res && res.timer) + '。', 'ok');
+            setStatus('后台服务正常。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');
