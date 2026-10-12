@@ -8,11 +8,15 @@ var SERVICE_NAME = 'com.woltv.wakeonlan.service';
 var DB_URI = 'luna://com.palm.db';
 var KIND = 'com.woltv.wakeonlan:1';
 var CONN_URI = 'luna://com.webos.service.connectionmanager';
+var ACT_URI = 'luna://com.palm.activitymanager';
+var ACT_NAME = 'com.woltv.wakeonlan.wake-loop';
 
 var DEFAULT_CONFIG = {
     enabled: true,
     sendOnBoot: true,
     triggerOnNetwork: false,
+    triggerTimer: false,
+    timerInterval: 5,
     mac: 'CC:28:AA:A7:B4:1F',
     ip: '255.255.255.255',
     port: 9,
@@ -27,6 +31,7 @@ var netTriggerState = { active: false, lastSend: 'none', error: '' };
 var netSub = null;
 var prevNetConnected = null;
 var keepAliveActivity = null;
+var timerState = { active: false, lastSend: 'none', error: '' };
 
 var configCache = null;
 
@@ -65,6 +70,8 @@ function normalizeConfig(c) {
         enabled: c ? c.enabled !== false : true,
         sendOnBoot: c ? c.sendOnBoot !== false : true,
         triggerOnNetwork: c ? c.triggerOnNetwork === true : false,
+        triggerTimer: c ? c.triggerTimer === true : false,
+        timerInterval: (c && typeof c.timerInterval === 'number') ? c.timerInterval : DEFAULT_CONFIG.timerInterval,
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
         port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
@@ -92,6 +99,8 @@ function saveConfig(cfg, cb) {
         obj.enabled = cfg.enabled !== false;
         obj.sendOnBoot = cfg.sendOnBoot !== false;
         obj.triggerOnNetwork = cfg.triggerOnNetwork === true;
+        obj.triggerTimer = cfg.triggerTimer === true;
+        obj.timerInterval = typeof cfg.timerInterval === 'number' ? cfg.timerInterval : DEFAULT_CONFIG.timerInterval;
         obj.mac = (cfg.mac || DEFAULT_CONFIG.mac).toString();
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
@@ -337,6 +346,49 @@ function stopNetworkTrigger() {
     netTriggerState.active = false;
 }
 
+function formatInterval(minutes) {
+    var m = parseInt(minutes, 10) || 5;
+    if (m < 5) { m = 5; }
+    var h = Math.floor(m / 60);
+    var r = m % 60;
+    if (h > 0 && r > 0) { return h + 'h' + r + 'm'; }
+    if (h > 0) { return h + 'h'; }
+    return m + 'm';
+}
+
+function startTimerTrigger(cfg) {
+    stopTimerTrigger();
+    if (!(cfg.enabled && cfg.triggerTimer)) { return; }
+    lunaCall(ACT_URI, 'create', {
+        activity: {
+            name: ACT_NAME,
+            description: 'Periodic wake-on-LAN for Windows PC',
+            type: { persist: true, background: true },
+            schedule: { interval: formatInterval(cfg.timerInterval) },
+            callback: {
+                method: 'luna://' + SERVICE_NAME + '/wake',
+                params: { mac: cfg.mac, ip: cfg.ip, port: cfg.port, broadcast: cfg.broadcast }
+            }
+        },
+        start: true,
+        replace: true
+    }, function (res) {
+        if (res && res.returnValue) {
+            timerState.active = true;
+            timerState.error = '';
+        } else {
+            timerState.active = false;
+            timerState.error = String((res && res.errorText) || 'activity create failed');
+        }
+    }, 6000);
+}
+
+function stopTimerTrigger() {
+    lunaCall(ACT_URI, 'cancel', { activityId: ACT_NAME }, function () {
+        timerState.active = false;
+    }, 6000);
+}
+
 function sendWOLWhenNetworkReady(cfg, cb) {
     var deadline = Date.now() + NET_CHECK_TIMEOUT_MS;
     var done = false;
@@ -423,6 +475,7 @@ function startBootAutosend() {
     loadConfig(function (err, cfg) {
         configCache = JSON.parse(JSON.stringify(cfg));
         startNetworkTrigger(cfg);
+        startTimerTrigger(cfg);
         if (!(cfg.enabled && cfg.sendOnBoot)) { return; }
         sendMagicPacket(cfg, function (sendErr) {
             bootState.lastSend = sendErr ? 'error' : 'sent';
@@ -481,7 +534,8 @@ service.register('setConfig', function (message) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
                 startNetworkTrigger(saved);
-                message.respond({ returnValue: true, config: saved, bootAuto: bootState, netTrigger: netTriggerState });
+                startTimerTrigger(saved);
+                message.respond({ returnValue: true, config: saved, bootAuto: bootState, netTrigger: netTriggerState, timer: timerState });
             }
         });
     } catch (e) {
@@ -494,7 +548,8 @@ service.register('getStatus', function (message) {
         returnValue: true,
         lastSend: lastSend,
         bootAuto: bootState,
-        netTrigger: netTriggerState
+        netTrigger: netTriggerState,
+        timer: timerState
     });
 });
 

@@ -13,9 +13,12 @@
         enabled: document.getElementById('enabled'),
         sendOnBoot: document.getElementById('sendOnBoot'),
         triggerNetwork: document.getElementById('triggerNetwork'),
+        triggerTimer: document.getElementById('triggerTimer'),
+        timerInterval: document.getElementById('timerInterval'),
         swEnabled: document.getElementById('swEnabled'),
         swSendOnBoot: document.getElementById('swSendOnBoot'),
         swTriggerNetwork: document.getElementById('swTriggerNetwork'),
+        swTriggerTimer: document.getElementById('swTriggerTimer'),
         save: document.getElementById('btnSave'),
         exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
@@ -249,6 +252,8 @@
                 els.enabled.checked = c.enabled !== false;
                 els.sendOnBoot.checked = c.sendOnBoot !== false;
                 els.triggerNetwork.checked = c.triggerOnNetwork === true;
+                els.triggerTimer.checked = c.triggerTimer === true;
+                els.timerInterval.value = c.timerInterval || 5;
                 ensureMacDefault();
                 rebuildDeviceList([], null);
                 setStatus('已加载设置。可点「扫描设备」选择目标。', 'ok');
@@ -260,6 +265,8 @@
                 els.enabled.checked = true;
                 els.sendOnBoot.checked = true;
                 els.triggerNetwork.checked = false;
+                els.triggerTimer.checked = false;
+                els.timerInterval.value = 5;
                 rebuildDeviceList([], null);
                 setStatus('已使用默认目标（' + DEFAULT_MAC + '），可直接保存。', '');
             });
@@ -272,7 +279,9 @@
             port: parseInt(els.port.value, 10) || 9,
             enabled: els.enabled.checked,
             sendOnBoot: els.sendOnBoot.checked,
-            triggerOnNetwork: els.triggerNetwork.checked
+            triggerOnNetwork: els.triggerNetwork.checked,
+            triggerTimer: els.triggerTimer.checked,
+            timerInterval: parseInt(els.timerInterval.value, 10) || 5
         };
     }
 
@@ -307,6 +316,20 @@
         return s;
     }
 
+    function timerStatusTxt(t) {
+        if (!t) { return ''; }
+        var m = {
+            sent: '定时重发已发送 ✓',
+            error: '定时重发失败',
+            sending: '定时重发发送中',
+            none: '定时重发未触发'
+        };
+        var s = '，' + (m[t.lastSend] || t.lastSend);
+        if (!t.active) { s += '（未启用）'; }
+        if (t.error) { s += '（' + t.error + '）'; }
+        return s;
+    }
+
     function saveConfig() {
         var cfg = readForm();
         if (!validMac(cfg.mac)) {
@@ -317,7 +340,8 @@
         callService('setConfig', cfg)
             .then(function (res) {
                 setStatus('已保存 ✓' + bootStatusTxt(res && res.bootAuto) +
-                    netTriggerStatusTxt(res && res.netTrigger), 'ok');
+                    netTriggerStatusTxt(res && res.netTrigger) +
+                    timerStatusTxt(res && res.timer), 'ok');
             })
             .catch(showError);
     }
@@ -351,7 +375,7 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.swTriggerNetwork,
+            els.swEnabled, els.swSendOnBoot, els.swTriggerNetwork, els.swTriggerTimer, els.timerInterval,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -376,14 +400,15 @@
         if (el === els.swEnabled) { els.enabled.checked = !els.enabled.checked; }
         else if (el === els.swSendOnBoot) { els.sendOnBoot.checked = !els.sendOnBoot.checked; }
         else if (el === els.swTriggerNetwork) { els.triggerNetwork.checked = !els.triggerNetwork.checked; }
+        else if (el === els.swTriggerTimer) { els.triggerTimer.checked = !els.triggerTimer.checked; }
         else if (el.tagName === 'BUTTON') { el.click(); }
     }
 
     function isEditableInput(el) {
-        return el && (el === els.mac || el === els.ip || el === els.port);
+        return el && (el === els.mac || el === els.ip || el === els.port || el === els.timerInterval);
     }
 
-    ['mac', 'ip', 'port'].forEach(function (key) {
+    ['mac', 'ip', 'port', 'timerInterval'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true;
         });
@@ -458,7 +483,8 @@
         .then(function (res) {
             setStatus('后台服务正常' +
                 bootStatusTxt(res && res.bootAuto) +
-                netTriggerStatusTxt(res && res.netTrigger) + '。', 'ok');
+                netTriggerStatusTxt(res && res.netTrigger) +
+                timerStatusTxt(res && res.timer) + '。', 'ok');
         })
         .catch(function () {
             setStatus('警告：后台服务无响应。请重新部署或重启电视后重试。', 'err');
