@@ -362,13 +362,15 @@ function ensurePersistActivity() {
     service.call('luna://com.palm.activitymanager/create', {
         activity: {
             name: 'com.woltv.wakeonlan.service.persist',
-            description: 'Relaunch WOL service after cold boot',
+            description: 'Resident wake-on-LAN service, resend every 3 seconds',
             type: { persist: true, background: true },
+            schedule: { interval: '3s', precise: true },
             callback: {
                 method: 'luna://com.woltv.wakeonlan.service/wake',
                 params: {}
             }
         },
+        start: true,
         replace: true
     }, function (message) {
         var p = message && message.payload;
