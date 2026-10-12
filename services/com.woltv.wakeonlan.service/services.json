@@ -5,7 +5,6 @@
         {
             "name": "com.woltv.wakeonlan.service",
             "description": "Sends Wake-on-LAN magic packets and stores configuration",
-            "onBoot": true,
             "commands": [
                 {
                     "name": "wake",

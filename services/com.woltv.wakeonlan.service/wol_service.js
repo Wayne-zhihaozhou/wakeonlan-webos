@@ -459,7 +459,31 @@ function startBootAutosend() {
     });
 }
 
+function ensurePersistActivity() {
+    service.call('luna://com.palm.activitymanager/create', {
+        activity: {
+            name: 'com.woltv.wakeonlan.service.persist',
+            description: 'Persistent watchdog to relaunch WOL service after cold boot',
+            type: { persist: true, background: true },
+            schedule: { interval: '5m' },
+            callback: {
+                method: 'luna://com.woltv.wakeonlan.service/wake',
+                params: {}
+            }
+        },
+        start: true,
+        replace: true,
+        subscribe: true
+    }, function (message) {
+        var p = message && message.payload;
+        if (!p || p.returnValue === false) {
+            console.log('persist activity create failed: ' + ((p && p.errorText) || ''));
+        }
+    });
+}
+
 startBootAutosend();
+ensurePersistActivity();
 
 service.register('wake', function (message) {
     var p = message.payload || {};
