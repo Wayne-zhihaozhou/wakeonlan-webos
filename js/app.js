@@ -242,31 +242,27 @@
         if (!els.mac.value.trim()) { els.mac.value = DEFAULT_MAC; }
     }
 
+    function applyConfig(c) {
+        els.mac.value = (c && c.mac) || DEFAULT_MAC;
+        els.ip.value = (c && c.ip) || '255.255.255.255';
+        els.port.value = (c && typeof c.port === 'number') ? c.port : 9;
+        els.enabled.checked = c ? c.enabled === true : true;
+        els.sendOnBoot.checked = c ? c.sendOnBoot === true : true;
+        els.triggerNetwork.checked = c ? c.triggerOnNetwork === true : true;
+        els.triggerTimer.checked = c ? c.triggerTimer === true : true;
+        els.timerInterval.value = (c && typeof c.timerInterval === 'number') ? c.timerInterval : 3;
+        ensureMacDefault();
+    }
+
     function loadConfig() {
         callService('getConfig')
             .then(function (res) {
-                var c = res.config;
-                els.mac.value = c.mac || '';
-                els.ip.value = c.ip || '255.255.255.255';
-                els.port.value = c.port || 9;
-                els.enabled.checked = c.enabled !== false;
-                els.sendOnBoot.checked = c.sendOnBoot !== false;
-                els.triggerNetwork.checked = c.triggerOnNetwork === true;
-                els.triggerTimer.checked = c.triggerTimer === true;
-                els.timerInterval.value = c.timerInterval || 3;
-                ensureMacDefault();
+                applyConfig(res.config);
                 rebuildDeviceList([], null);
                 setStatus('已加载设置。可点「扫描设备」选择目标。', 'ok');
             })
             .catch(function () {
-                els.mac.value = DEFAULT_MAC;
-                els.ip.value = '255.255.255.255';
-                els.port.value = 9;
-                els.enabled.checked = true;
-                els.sendOnBoot.checked = true;
-                els.triggerNetwork.checked = true;
-                els.triggerTimer.checked = true;
-                els.timerInterval.value = 3;
+                applyConfig(null);
                 rebuildDeviceList([], null);
                 setStatus('已使用默认目标（' + DEFAULT_MAC + '），可直接保存。', '');
             });
@@ -339,6 +335,7 @@
         setStatus('保存中…');
         callService('setConfig', cfg)
             .then(function (res) {
+                applyConfig(res && res.config);
                 setStatus('已保存 ✓' + bootStatusTxt(res && res.bootAuto) +
                     netTriggerStatusTxt(res && res.netTrigger) +
                     timerStatusTxt(res && res.timer), 'ok');
