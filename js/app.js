@@ -288,7 +288,6 @@
             none: '网络触发未触发'
         };
         var s = '，' + (m[nt.lastSend] || nt.lastSend);
-        if (!nt.active) { s += '（未启用）'; }
         if (nt.error) { s += '（' + nt.error + '）'; }
         return s;
     }
@@ -302,7 +301,6 @@
             none: '定时重发未触发'
         };
         var s = '，' + (m[t.lastSend] || t.lastSend);
-        if (!t.active) { s += '（未启用）'; }
         if (t.error) { s += '（' + t.error + '）'; }
         return s;
     }
