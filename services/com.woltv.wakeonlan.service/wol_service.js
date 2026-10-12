@@ -8,8 +8,6 @@ var SERVICE_NAME = 'com.woltv.wakeonlan.service';
 var DB_URI = 'luna://com.palm.db';
 var KIND = 'com.woltv.wakeonlan:1';
 var CONN_URI = 'luna://com.webos.service.connectionmanager';
-var ACT_URI = 'luna://com.palm.activitymanager';
-var ACT_NAME = 'com.woltv.wakeonlan.wake-loop';
 
 var FLAGS = {
     enabled: true,
@@ -340,55 +338,30 @@ function stopNetworkTrigger() {
     netTriggerState.active = false;
 }
 
-function formatInterval(seconds) {
-    var s = parseInt(seconds, 10) || 3;
-    if (s < 1) { s = 1; }
-    var d = Math.floor(s / 86400);
-    var h = Math.floor((s % 86400) / 3600);
-    var m = Math.floor((s % 3600) / 60);
-    var r = s % 60;
-    var out = '';
-    if (d > 0) { out += d + 'd'; }
-    if (h > 0) { out += h + 'h'; }
-    if (m > 0) { out += m + 'm'; }
-    if (r > 0 || !out) { out += r + 's'; }
-    return out;
-}
+var sendLoopTimer = null;
 
-function startTimerTrigger(cfg) {
-    stopTimerTrigger();
+function startContinuousSend(cfg) {
+    stopContinuousSend();
     if (!(cfg.enabled && cfg.triggerTimer)) { return; }
     var seconds = parseInt(cfg.timerInterval, 10) || 3;
-    var schedule = { interval: formatInterval(seconds) };
-    if (seconds < 300) { schedule.precise = true; }
-    lunaCall(ACT_URI, 'create', {
-        activity: {
-            name: ACT_NAME,
-            description: 'Periodic wake-on-LAN for Windows PC',
-            type: { persist: true, background: true },
-            schedule: schedule,
-            callback: {
-                method: 'luna://' + SERVICE_NAME + '/wake',
-                params: { mac: cfg.mac, ip: cfg.ip, port: cfg.port, broadcast: cfg.broadcast }
-            }
-        },
-        start: true,
-        replace: true
-    }, function (res) {
-        if (res && res.returnValue) {
-            timerState.active = true;
-            timerState.error = '';
-        } else {
-            timerState.active = false;
-            timerState.error = String((res && res.errorText) || 'activity create failed');
-        }
-    }, 6000);
+    if (seconds < 1) { seconds = 1; }
+    timerState.active = true;
+    timerState.error = '';
+    sendLoopTimer = setInterval(function () {
+        sendWOL(cfg, function (err) {
+            timerState.lastSend = err ? 'error' : 'sent';
+            timerState.error = err ? (err.message || String(err)) : '';
+            recordSend(!err, err && err.message);
+        });
+    }, seconds * 1000);
 }
 
-function stopTimerTrigger() {
-    lunaCall(ACT_URI, 'cancel', { activityId: ACT_NAME }, function () {
-        timerState.active = false;
-    }, 6000);
+function stopContinuousSend() {
+    if (sendLoopTimer) {
+        try { clearInterval(sendLoopTimer); } catch (e) { }
+        sendLoopTimer = null;
+    }
+    timerState.active = false;
 }
 
 function sendWOLWhenNetworkReady(cfg, cb) {
@@ -477,7 +450,7 @@ function startBootAutosend() {
     loadConfig(function (err, cfg) {
         configCache = JSON.parse(JSON.stringify(cfg));
         startNetworkTrigger(cfg);
-        startTimerTrigger(cfg);
+        startContinuousSend(cfg);
         if (!(cfg.enabled && cfg.sendOnBoot)) { return; }
         sendMagicPacket(cfg, function (sendErr) {
             bootState.lastSend = sendErr ? 'error' : 'sent';
@@ -535,7 +508,7 @@ service.register('setConfig', function (message) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
                 startNetworkTrigger(saved);
-                startTimerTrigger(saved);
+                startContinuousSend(saved);
                 message.respond({ returnValue: true, config: saved, bootAuto: bootState, netTrigger: netTriggerState, timer: timerState });
             }
         });
