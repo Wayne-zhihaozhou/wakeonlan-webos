@@ -73,21 +73,21 @@
                     <p class="hint">后台服务监听电视的网络连接状态。当网络从断开变为已连接（例如路由器重启、网线重插、Wi-Fi 重连）时，自动发送一次魔术包唤醒电脑。需保持后台服务运行。</p>
                 </div>
                 <label id="swTriggerNetwork" class="switch" tabindex="0">
-                    <input type="checkbox" id="triggerNetwork">
+                    <input type="checkbox" id="triggerNetwork" checked>
                     <span class="slider"></span>
                 </label>
             </div>
             <div class="row switch-row">
                 <div class="field grow">
                     <label>定时周期重发</label>
-                    <p class="hint">注册一个持久化的系统闹钟（Activity Manager，落盘 db8，跨冷开机保留）。每 N 分钟自动发送一次魔术包并重新拉起电脑；即使电视冷开机后也会按周期持续重发。最小间隔 5 分钟。</p>
+                    <p class="hint">注册一个持久化的系统闹钟（Activity Manager，落盘 db8，跨冷开机保留）。每 N 秒自动发送一次魔术包并重新拉起电脑；即使电视冷开机后也会按周期持续重发。较短间隔需要 precise 调度，电视端建议不要过短。</p>
                 </div>
                 <div class="field small">
-                    <label for="timerInterval">间隔(分钟)</label>
-                    <input id="timerInterval" type="number" value="5" min="5" max="1440" readonly>
+                    <label for="timerInterval">间隔(秒)</label>
+                    <input id="timerInterval" type="number" value="30" min="1" max="86400" readonly>
                 </div>
                 <label id="swTriggerTimer" class="switch" tabindex="0">
-                    <input type="checkbox" id="triggerTimer">
+                    <input type="checkbox" id="triggerTimer" checked>
                     <span class="slider"></span>
                 </label>
             </div>

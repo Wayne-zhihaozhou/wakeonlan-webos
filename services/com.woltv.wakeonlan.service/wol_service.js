@@ -14,9 +14,9 @@ var ACT_NAME = 'com.woltv.wakeonlan.wake-loop';
 var DEFAULT_CONFIG = {
     enabled: true,
     sendOnBoot: true,
-    triggerOnNetwork: false,
-    triggerTimer: false,
-    timerInterval: 5,
+    triggerOnNetwork: true,
+    triggerTimer: true,
+    timerInterval: 30,
     mac: 'CC:28:AA:A7:B4:1F',
     ip: '255.255.255.255',
     port: 9,
@@ -69,8 +69,8 @@ function normalizeConfig(c) {
         _id: c && c._id,
         enabled: c ? c.enabled !== false : true,
         sendOnBoot: c ? c.sendOnBoot !== false : true,
-        triggerOnNetwork: c ? c.triggerOnNetwork === true : false,
-        triggerTimer: c ? c.triggerTimer === true : false,
+        triggerOnNetwork: c ? c.triggerOnNetwork === true : true,
+        triggerTimer: c ? c.triggerTimer === true : true,
         timerInterval: (c && typeof c.timerInterval === 'number') ? c.timerInterval : DEFAULT_CONFIG.timerInterval,
         mac: (c && c.mac) || DEFAULT_CONFIG.mac,
         ip: (c && c.ip) || DEFAULT_CONFIG.ip,
@@ -346,25 +346,33 @@ function stopNetworkTrigger() {
     netTriggerState.active = false;
 }
 
-function formatInterval(minutes) {
-    var m = parseInt(minutes, 10) || 5;
-    if (m < 5) { m = 5; }
-    var h = Math.floor(m / 60);
-    var r = m % 60;
-    if (h > 0 && r > 0) { return h + 'h' + r + 'm'; }
-    if (h > 0) { return h + 'h'; }
-    return m + 'm';
+function formatInterval(seconds) {
+    var s = parseInt(seconds, 10) || 30;
+    if (s < 1) { s = 1; }
+    var d = Math.floor(s / 86400);
+    var h = Math.floor((s % 86400) / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var r = s % 60;
+    var out = '';
+    if (d > 0) { out += d + 'd'; }
+    if (h > 0) { out += h + 'h'; }
+    if (m > 0) { out += m + 'm'; }
+    if (r > 0 || !out) { out += r + 's'; }
+    return out;
 }
 
 function startTimerTrigger(cfg) {
     stopTimerTrigger();
     if (!(cfg.enabled && cfg.triggerTimer)) { return; }
+    var seconds = parseInt(cfg.timerInterval, 10) || 30;
+    var schedule = { interval: formatInterval(seconds) };
+    if (seconds < 300) { schedule.precise = true; }
     lunaCall(ACT_URI, 'create', {
         activity: {
             name: ACT_NAME,
             description: 'Periodic wake-on-LAN for Windows PC',
             type: { persist: true, background: true },
-            schedule: { interval: formatInterval(cfg.timerInterval) },
+            schedule: schedule,
             callback: {
                 method: 'luna://' + SERVICE_NAME + '/wake',
                 params: { mac: cfg.mac, ip: cfg.ip, port: cfg.port, broadcast: cfg.broadcast }
