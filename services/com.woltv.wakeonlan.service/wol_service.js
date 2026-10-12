@@ -23,6 +23,9 @@ var service = new Service(SERVICE_NAME);
 var lastSend = { at: 0, ok: false, error: '' };
 
 var configCache = null;
+var keepAliveActivity = null;
+var sendLoopTimer = null;
+var SEND_INTERVAL_MS = 3000;
 
 function lunaCall(uri, method, parameters, cb, timeoutMs) {
     var called = false;
@@ -358,20 +361,54 @@ function sendMagicPacket(cfg, cb) {
     });
 }
 
+function startKeepAlive() {
+    if (keepAliveActivity) { return; }
+    try {
+        service.activityManager.create('keepAlive', function (activity) {
+            keepAliveActivity = activity;
+        });
+    } catch (e) { }
+}
+
+function startSendLoop(cfg) {
+    stopSendLoop();
+    sendLoopTimer = setInterval(function () {
+        sendWOL(cfg, function (err) {
+            recordSend(!err, err && err.message);
+        });
+    }, SEND_INTERVAL_MS);
+}
+
+function stopSendLoop() {
+    if (sendLoopTimer) {
+        try { clearInterval(sendLoopTimer); } catch (e) { }
+        sendLoopTimer = null;
+    }
+}
+
+function startResident() {
+    loadConfig(function (err, cfg) {
+        configCache = JSON.parse(JSON.stringify(cfg));
+        startKeepAlive();
+        startSendLoop(cfg);
+    });
+}
+
 function ensurePersistActivity() {
     service.call('luna://com.palm.activitymanager/create', {
         activity: {
             name: 'com.woltv.wakeonlan.service.persist',
-            description: 'Resident wake-on-LAN service, resend every 3 seconds',
+            description: 'Persistent watchdog to relaunch WOL service after cold boot',
             type: { persist: true, background: true },
-            schedule: { interval: '3s', precise: true },
+            schedule: { interval: '5m' },
             callback: {
                 method: 'luna://com.woltv.wakeonlan.service/wake',
                 params: {}
             }
         },
         start: true,
-        replace: true
+        replace: true,
+        subscribe: true
     }, function (message) {
         var p = message && message.payload;
         if (!p || p.returnValue === false) {
@@ -380,6 +417,7 @@ function ensurePersistActivity() {
     });
 }
 
+startResident();
 ensurePersistActivity();
 
 service.register('wake', function (message) {
@@ -424,6 +462,7 @@ service.register('setConfig', function (message) {
             if (saveErr) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
+                startSendLoop(saved);
                 message.respond({ returnValue: true, config: saved });
             }
         });
