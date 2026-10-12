@@ -46,53 +46,6 @@
             <p class="hint">聚焦到输入框时不会自动弹出键盘；需要修改时先按 OK 才会出现软键盘。</p>
         </section>
 
-        <section class="card">
-            <div class="row switch-row">
-                <div class="field grow">
-                    <label>启用功能</label>
-                    <p class="hint">总开关。关闭后不发送任何魔术包。</p>
-                </div>
-                <label id="swEnabled" class="switch" tabindex="0">
-                    <input type="checkbox" id="enabled" checked>
-                    <span class="slider"></span>
-                </label>
-            </div>
-            <div class="row switch-row">
-                <div class="field grow">
-                    <label>开机自动发送</label>
-                    <p class="hint">电视开机后由后台服务自动发送一次魔术包唤醒电脑。发送前会先确认电视已联网，未联网则每 5 秒重查，最多等待 5 分钟。不依赖屏幕/电源触发信号。</p>
-                </div>
-                <label id="swSendOnBoot" class="switch" tabindex="0">
-                    <input type="checkbox" id="sendOnBoot" checked>
-                    <span class="slider"></span>
-                </label>
-            </div>
-            <div class="row switch-row">
-                <div class="field grow">
-                    <label>网络恢复时自动发送</label>
-                    <p class="hint">后台服务监听电视的网络连接状态。当网络从断开变为已连接（例如路由器重启、网线重插、Wi-Fi 重连）时，自动发送一次魔术包唤醒电脑。需保持后台服务运行。</p>
-                </div>
-                <label id="swTriggerNetwork" class="switch" tabindex="0">
-                    <input type="checkbox" id="triggerNetwork" checked>
-                    <span class="slider"></span>
-                </label>
-            </div>
-            <div class="row switch-row">
-                <div class="field grow">
-                    <label>定时周期重发</label>
-                    <p class="hint">注册一个持久化的系统闹钟（Activity Manager，落盘 db8，跨冷开机保留）。每 N 秒自动发送一次魔术包并重新拉起电脑；即使电视冷开机后也会按周期持续重发。较短间隔需要 precise 调度，电视端建议不要过短。</p>
-                </div>
-                <div class="field small">
-                    <label for="timerInterval">间隔(秒)</label>
-                    <input id="timerInterval" type="number" value="3" min="1" max="86400" readonly>
-                </div>
-                <label id="swTriggerTimer" class="switch" tabindex="0">
-                    <input type="checkbox" id="triggerTimer" checked>
-                    <span class="slider"></span>
-                </label>
-            </div>
-        </section>
-
         <section class="card actions">
             <button id="btnSave" class="btn">保存</button>
             <button id="btnExit" class="btn">退出</button>

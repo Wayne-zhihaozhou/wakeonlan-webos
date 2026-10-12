@@ -11,20 +11,19 @@ var CONN_URI = 'luna://com.webos.service.connectionmanager';
 var ACT_URI = 'luna://com.palm.activitymanager';
 var ACT_NAME = 'com.woltv.wakeonlan.wake-loop';
 
-// 配置结构版本：v2 起网络触发与定时重发默认开启。
-// 用于迁移旧版（v1 及更早，字段保存为 false）的已持久化配置。
-var SCHEMA_VERSION = 2;
-
-var DEFAULT_CONFIG = {
+var FLAGS = {
     enabled: true,
     sendOnBoot: true,
     triggerOnNetwork: true,
     triggerTimer: true,
     timerInterval: 3,
+    broadcast: true
+};
+
+var DEFAULT_CONFIG = {
     mac: 'CC:28:AA:A7:B4:1F',
     ip: '255.255.255.255',
-    port: 9,
-    broadcast: true
+    port: 9
 };
 
 var service = new Service(SERVICE_NAME);
@@ -68,42 +67,31 @@ function ensureKind(cb) {
     });
 }
 
-function normalizeConfig(c) {
-    // 旧版本配置（无 version 或 version < SCHEMA_VERSION）需要迁移：
-    // 网络触发/定时重发默认值改为开启，覆盖旧版保存的 false。
-    var legacy = !c || c.version !== SCHEMA_VERSION;
-    return {
-        _id: c && c._id,
-        version: SCHEMA_VERSION,
-        enabled: c ? c.enabled !== false : true,
-        sendOnBoot: c ? c.sendOnBoot !== false : true,
-        triggerOnNetwork: c ? (legacy ? true : c.triggerOnNetwork === true) : true,
-        triggerTimer: c ? (legacy ? true : c.triggerTimer === true) : true,
-        timerInterval: (c && typeof c.timerInterval === 'number') ? c.timerInterval : DEFAULT_CONFIG.timerInterval,
-        mac: (c && c.mac) || DEFAULT_CONFIG.mac,
-        ip: (c && c.ip) || DEFAULT_CONFIG.ip,
-        port: (c && typeof c.port === 'number') ? c.port : DEFAULT_CONFIG.port,
-        broadcast: c ? c.broadcast !== false : true
+function fullConfig(device) {
+    var cfg = {
+        enabled: FLAGS.enabled,
+        sendOnBoot: FLAGS.sendOnBoot,
+        triggerOnNetwork: FLAGS.triggerOnNetwork,
+        triggerTimer: FLAGS.triggerTimer,
+        timerInterval: FLAGS.timerInterval,
+        broadcast: FLAGS.broadcast
     };
+    cfg.mac = (device && device.mac) || DEFAULT_CONFIG.mac;
+    cfg.ip = (device && device.ip) || DEFAULT_CONFIG.ip;
+    cfg.port = (device && typeof device.port === 'number') ? device.port : DEFAULT_CONFIG.port;
+    cfg._id = device && device._id;
+    return cfg;
 }
 
 function loadConfig(cb) {
-    if (configCache) { cb(null, JSON.parse(JSON.stringify(configCache))); return; }
+    if (configCache) { cb(null, fullConfig(configCache)); return; }
     dbCall('find', { query: { from: KIND } }, function (res) {
         var raw = null;
         if (res && res.returnValue && res.results && res.results.length > 0) {
             raw = res.results[0];
         }
-        var normalized = normalizeConfig(raw);
-        configCache = normalized;
-        if (raw && raw.version !== SCHEMA_VERSION) {
-            // 旧版配置迁移：把新默认值写回数据库，仅此一次，之后尊重用户改动
-            saveConfig(normalized, function () {
-                cb(null, JSON.parse(JSON.stringify(configCache)));
-            });
-        } else {
-            cb(null, JSON.parse(JSON.stringify(configCache)));
-        }
+        configCache = raw || {};
+        cb(null, fullConfig(configCache));
     });
 }
 
@@ -112,31 +100,20 @@ function saveConfig(cfg, cb) {
         var obj = {};
         if (existing && existing._id) { obj._id = existing._id; }
         obj._kind = KIND;
-        obj.version = SCHEMA_VERSION;
-        obj.enabled = cfg.enabled !== false;
-        obj.sendOnBoot = cfg.sendOnBoot !== false;
-        obj.triggerOnNetwork = cfg.triggerOnNetwork === true;
-        obj.triggerTimer = cfg.triggerTimer === true;
-        obj.timerInterval = typeof cfg.timerInterval === 'number' ? cfg.timerInterval : DEFAULT_CONFIG.timerInterval;
         obj.mac = (cfg.mac || DEFAULT_CONFIG.mac).toString();
         obj.ip = (cfg.ip || DEFAULT_CONFIG.ip).toString();
         obj.port = typeof cfg.port === 'number' ? cfg.port : DEFAULT_CONFIG.port;
-        obj.broadcast = cfg.broadcast !== false;
 
-        configCache = normalizeConfig(obj);
+        configCache = obj;
 
         function doPut() {
             dbCall('put', { objects: [obj] }, function (res) {
                 if (res && res.returnValue) {
-                    cb(null, configCache);
+                    cb(null, fullConfig(configCache));
                 } else {
                     ensureKind(function () {
                         dbCall('put', { objects: [obj] }, function (res2) {
-                            if (res2 && res2.returnValue) {
-                                cb(null, configCache);
-                            } else {
-                                cb(null, configCache);
-                            }
+                            cb(null, fullConfig(configCache));
                         });
                     });
                 }
@@ -517,7 +494,6 @@ service.register('wake', function (message) {
         if (p.mac) { cfg.mac = p.mac; }
         if (p.ip) { cfg.ip = p.ip; }
         if (p.port) { cfg.port = p.port; }
-        if (p.broadcast !== undefined) { cfg.broadcast = p.broadcast; }
 
         function respond(sendErr) {
             if (sendErr) {

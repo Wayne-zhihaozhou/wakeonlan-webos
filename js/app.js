@@ -10,15 +10,6 @@
         mac: document.getElementById('mac'),
         ip: document.getElementById('ip'),
         port: document.getElementById('port'),
-        enabled: document.getElementById('enabled'),
-        sendOnBoot: document.getElementById('sendOnBoot'),
-        triggerNetwork: document.getElementById('triggerNetwork'),
-        triggerTimer: document.getElementById('triggerTimer'),
-        timerInterval: document.getElementById('timerInterval'),
-        swEnabled: document.getElementById('swEnabled'),
-        swSendOnBoot: document.getElementById('swSendOnBoot'),
-        swTriggerNetwork: document.getElementById('swTriggerNetwork'),
-        swTriggerTimer: document.getElementById('swTriggerTimer'),
         save: document.getElementById('btnSave'),
         exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
@@ -246,11 +237,6 @@
         els.mac.value = (c && c.mac) || DEFAULT_MAC;
         els.ip.value = (c && c.ip) || '255.255.255.255';
         els.port.value = (c && typeof c.port === 'number') ? c.port : 9;
-        els.enabled.checked = c ? c.enabled === true : true;
-        els.sendOnBoot.checked = c ? c.sendOnBoot === true : true;
-        els.triggerNetwork.checked = c ? c.triggerOnNetwork === true : true;
-        els.triggerTimer.checked = c ? c.triggerTimer === true : true;
-        els.timerInterval.value = (c && typeof c.timerInterval === 'number') ? c.timerInterval : 3;
         ensureMacDefault();
     }
 
@@ -272,12 +258,7 @@
         return {
             mac: els.mac.value.trim(),
             ip: els.ip.value.trim() || '255.255.255.255',
-            port: parseInt(els.port.value, 10) || 9,
-            enabled: els.enabled.checked,
-            sendOnBoot: els.sendOnBoot.checked,
-            triggerOnNetwork: els.triggerNetwork.checked,
-            triggerTimer: els.triggerTimer.checked,
-            timerInterval: parseInt(els.timerInterval.value, 10) || 3
+            port: parseInt(els.port.value, 10) || 9
         };
     }
 
@@ -372,7 +353,6 @@
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
-            els.swEnabled, els.swSendOnBoot, els.swTriggerNetwork, els.swTriggerTimer, els.timerInterval,
             els.save, els.exit, els.wake
         ];
         return sel.filter(function (el) { return el && el.offsetParent !== null; });
@@ -394,18 +374,14 @@
     function activateFocused() {
         var el = document.activeElement;
         if (!el) { return; }
-        if (el === els.swEnabled) { els.enabled.checked = !els.enabled.checked; }
-        else if (el === els.swSendOnBoot) { els.sendOnBoot.checked = !els.sendOnBoot.checked; }
-        else if (el === els.swTriggerNetwork) { els.triggerNetwork.checked = !els.triggerNetwork.checked; }
-        else if (el === els.swTriggerTimer) { els.triggerTimer.checked = !els.triggerTimer.checked; }
-        else if (el.tagName === 'BUTTON') { el.click(); }
+        if (el.tagName === 'BUTTON') { el.click(); }
     }
 
     function isEditableInput(el) {
-        return el && (el === els.mac || el === els.ip || el === els.port || el === els.timerInterval);
+        return el && (el === els.mac || el === els.ip || el === els.port);
     }
 
-    ['mac', 'ip', 'port', 'timerInterval'].forEach(function (key) {
+    ['mac', 'ip', 'port'].forEach(function (key) {
         els[key].addEventListener('blur', function () {
             this.readOnly = true;
         });
