@@ -375,45 +375,13 @@ function recordSend(ok, error, reason) {
     lastSend = { at: Date.now(), ok: ok, error: error || '', reason: reason || '' };
 }
 
-var BURST_COUNT = 3;
-var BURST_GAP_MS = 2500;
-var START_DELAY_MS = 1500;
-
-function sendMagicBurst(cfg, reason, cb) {
-    var attempts = 0;
-    var errors = [];
-    setTimeout(function () {
-        once();
-    }, START_DELAY_MS);
-
-    function once() {
-        sendWOLWhenNetworkReady(cfg, function (err) {
-            attempts++;
-            if (err) { errors.push(String(err.message || err)); }
-            console.log('magic packet attempt ' + attempts + '/' + BURST_COUNT + ' reason=' + reason + ' ok=' + !err + (err ? ' error=' + err.message : ''));
-            if (attempts >= BURST_COUNT) {
-                recordSend(errors.length === 0, errors.join('; '), reason);
-                rememberEvent('发送 ' + attempts + ' 次 ' + (errors.length === 0 ? '成功' : '失败'));
-                if (cb) { cb(errors.length === 0, errors); }
-            } else {
-                setTimeout(once, BURST_GAP_MS);
-            }
-        });
-    }
-}
-
 function sendMagicPacket(cfg, reason, cb) {
     if (!cfg) { cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG)); }
-    var useBurst = reason === 'powerOn' || reason === 'resume' || reason === 'boot' || reason === 'manual';
-    if (!useBurst) {
-        sendWOLWhenNetworkReady(cfg, function (err) {
-            recordSend(!err, err && err.message, reason);
-            if (cb) { cb(err); }
-        });
-        return;
-    }
-    sendMagicBurst(cfg, reason, function (ok) {
-        if (cb) { cb(ok ? null : new Error('send failed')); }
+    sendWOLWhenNetworkReady(cfg, function (err) {
+        recordSend(!err, err && err.message, reason);
+        console.log('magic packet sent reason=' + reason + ' ok=' + !err + (err ? ' error=' + err.message : ''));
+        rememberEvent('发送魔术包 ' + (err ? '失败' : '成功'));
+        if (cb) { cb(err); }
     });
 }
 
