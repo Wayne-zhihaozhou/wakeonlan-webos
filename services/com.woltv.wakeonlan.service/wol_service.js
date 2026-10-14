@@ -417,10 +417,11 @@ function sendMagicPacket(cfg, reason, cb) {
     });
 }
 
-function ackPowerPrepare(ackMethod, triggerMethod) {
+function ackPowerPrepare(ackMethod, triggerMethod, timestamp) {
     lunaCall(TVPOWER_URI, ackMethod, {
         clientName: SERVICE_NAME,
-        returnValue: true
+        ack: true,
+        timestamp: String(timestamp || Date.now())
     }, function (res) {
         console.log('ack ' + ackMethod + ' for ' + triggerMethod + ': ' + JSON.stringify(res));
     }, 3000);
@@ -489,7 +490,7 @@ function registerPowerTrigger(trigger) {
         state.events++;
         console.log('power event ' + trigger.method + ': ' + JSON.stringify(payload));
         if (!trigger.wake) { return; }
-        ackPowerPrepare(trigger.ack, trigger.method);
+        ackPowerPrepare(trigger.ack, trigger.method, payload.timestamp);
         rememberEvent('收到 ' + trigger.method);
         triggerWake(trigger.method === 'registerPrepareResume' ? 'resume' : 'powerOn', payload);
     });
@@ -519,7 +520,7 @@ function registerIncomingHooks() {
             console.log('incoming ' + hook.method + ': ' + JSON.stringify(payload));
             message.respond({ returnValue: true, received: hook.method });
             if (hook.wake) {
-                ackPowerPrepare(hook.ack, hook.method);
+                ackPowerPrepare(hook.ack, hook.method, payload.timestamp);
                 triggerWake(hook.method.indexOf('Resume') >= 0 ? 'resume' : 'powerOn', payload);
             }
         });
