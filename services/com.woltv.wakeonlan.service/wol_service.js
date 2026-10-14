@@ -23,9 +23,6 @@ var service = new Service(SERVICE_NAME);
 var lastSend = { at: 0, ok: false, error: '' };
 
 var configCache = null;
-var keepAliveActivity = null;
-var sendLoopTimer = null;
-var SEND_INTERVAL_MS = 3000;
 
 function lunaCall(uri, method, parameters, cb, timeoutMs) {
     var called = false;
@@ -361,39 +358,6 @@ function sendMagicPacket(cfg, cb) {
     });
 }
 
-function startKeepAlive() {
-    if (keepAliveActivity) { return; }
-    try {
-        service.activityManager.create('keepAlive', function (activity) {
-            keepAliveActivity = activity;
-        });
-    } catch (e) { }
-}
-
-function startSendLoop(cfg) {
-    stopSendLoop();
-    sendLoopTimer = setInterval(function () {
-        sendWOL(cfg, function (err) {
-            recordSend(!err, err && err.message);
-        });
-    }, SEND_INTERVAL_MS);
-}
-
-function stopSendLoop() {
-    if (sendLoopTimer) {
-        try { clearInterval(sendLoopTimer); } catch (e) { }
-        sendLoopTimer = null;
-    }
-}
-
-function startResident() {
-    loadConfig(function (err, cfg) {
-        configCache = JSON.parse(JSON.stringify(cfg));
-        startKeepAlive();
-        startSendLoop(cfg);
-    });
-}
-
 function ensurePersistActivity() {
     service.call('luna://com.palm.activitymanager/create', {
         activity: {
@@ -417,7 +381,6 @@ function ensurePersistActivity() {
     });
 }
 
-startResident();
 ensurePersistActivity();
 
 service.register('wake', function (message) {
@@ -462,7 +425,6 @@ service.register('setConfig', function (message) {
             if (saveErr) {
                 message.respond({ returnValue: false, errorText: String(saveErr.errorText || saveErr) });
             } else {
-                startSendLoop(saved);
                 message.respond({ returnValue: true, config: saved });
             }
         });
