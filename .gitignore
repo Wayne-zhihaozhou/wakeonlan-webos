@@ -13,3 +13,6 @@ Thumbs.db
 # 本地 Passphrase（含个人电视密钥，勿提交）
 passphrase.txt
 *.local.ps1
+
+# LG webOS 官方中文文档（版权归 LG 所有，本地自留，不随仓库分发）
+docs/官方文档/
