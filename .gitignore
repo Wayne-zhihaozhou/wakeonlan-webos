@@ -16,3 +16,6 @@ passphrase.txt
 
 # LG webOS 官方中文文档（版权归 LG 所有，本地自留，不随仓库分发）
 docs/官方文档/
+
+# 本地工具：平铺导出源码（仅本机使用，不需要上传到服务器/远程）
+copy-project.ps1
