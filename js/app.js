@@ -308,6 +308,26 @@
         } catch (e) { }
     }
 
+    function loadBuildInfo() {
+        var el = document.getElementById('build');
+        if (!el) { return; }
+        try {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', 'appinfo.json', true);
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) { return; }
+                var info;
+                try { info = JSON.parse(xhr.responseText); } catch (e) { return; }
+                if (!info) { return; }
+                var parts = [];
+                if (info.version) { parts.push('v' + info.version); }
+                if (info.buildHash) { parts.push(info.buildHash); }
+                if (parts.length) { el.textContent = ' | ' + parts.join(' · '); }
+            };
+            xhr.send();
+        } catch (e) { }
+    }
+
     function getFocusOrder() {
         var sel = [
             els.device, els.scan, els.mac, els.ip, els.port,
@@ -408,6 +428,7 @@
     els.wake.addEventListener('click', wakeNow);
 
     loadConfig();
+    loadBuildInfo();
     window.setTimeout(function () { focusAt(0); }, 300);
 
     callService('getStatus', {}, 6000)

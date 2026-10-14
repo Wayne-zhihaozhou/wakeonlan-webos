@@ -1,26 +1,4 @@
-﻿<#
- =====================================================================
-  Wake-on-LAN · webOS 电视部署脚本 (一键)
-  ---------------------------------------------------------------------
-  ⚠️ 重要：请先【断开 VPN】，否则连不到电视 192.168.1.4:9922。
-  电视上请保持 Developer Mode 应用在前台（Key Server 生效）。
-
-  用法（建议管理员 PowerShell）：
-      powershell -ExecutionPolicy Bypass -File .\deploy-wakeonlan.ps1
-  可选参数：-TvIp <电视IP> -Device <设备名> -Passphrase <6位Passphrase>
-
-  Passphrase（电视 Developer Mode 左下角 6 位字符）按以下顺序获取：
-      1) -Passphrase 参数
-      2) 环境变量 WEBOS_PASSPHRASE
-      3) 项目根目录 passphrase.txt（已 gitignore，不会提交）
-      4) 交互式输入
-   不再内置/默认任何具体 Passphrase。
-
-  自动完成：连通行检查 → 修正novacom host → 取密钥 → 打包 → 安装 → 启动
-  每步打印 [OK]/[FAIL]，末尾给汇总。
- =====================================================================
-#>
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$TvIp       = '192.168.1.4',
     [int]   $TvPort     = 9922,
@@ -43,7 +21,6 @@ function Ok($msg)  { Write-Host ("  [OK]   " + $msg) -ForegroundColor Green }
 function Fail($msg){ Write-Host ("  [FAIL] " + $msg) -ForegroundColor Red }
 function Warn($msg){ Write-Host ("  [!!]   " + $msg) -ForegroundColor Yellow }
 
-# 解析 Passphrase：参数 > 环境变量 > 本地 passphrase.txt > 交互输入。绝不内置任何具体值。
 function Get-Passphrase {
     if ($Passphrase) { return $Passphrase }
     if ($env:WEBOS_PASSPHRASE) { return $env:WEBOS_PASSPHRASE }
@@ -66,9 +43,6 @@ function Step-Port([string]$ip, [int]$port) {
     return $false
 }
 
-# 关键：webOS TV Dev Mode 的 ares-novacom --getkey 只在 tv 这个 profile 下受支持。
-# 若 profile 被误改为 ose（模拟器）等，就会出现 "This command is not supported by current profile"。
-# 这里在脚本开头强制切回 tv profile，避免因乱改 profile 而失败。
 function Ensure-TvProfile {
     $current = & ares-config -c 2>&1 | Out-String
     if ($current -notmatch '\btv\b') {
@@ -78,8 +52,6 @@ function Ensure-TvProfile {
     return ($after -match '\btv\b')
 }
 
-# 依据当前生效的 profile 定位 novacom 配置（profile 目录名 = 当前 profile）。
-# 旧版脚本硬编码 tv 路径，若 profile 为 ose 会改错文件，导致修正 host 不生效。
 function Get-ActiveNovacomConfig {
     $prof = (& ares-config -c 2>&1 | Out-String).Trim()
     if ($prof -match 'profile set to\s+(\S+)') { $prof = $Matches[1] }
@@ -112,6 +84,23 @@ function Get-Key {
         Fail "请确认：① 电视 Developer Mode 保持在前台（Dev Mode Status=ON、Key Server=ON、会话未过期）；② 使用的 Passphrase 与电视左下角 6 位字符完全一致（区分大小写）。"
         return $false
     }
+    return $true
+}
+
+function Get-CommitHash {
+    $hash = ''
+    try { $hash = (& git -C $ProjectDir rev-parse --short HEAD 2>$null | Out-String).Trim() } catch { $hash = '' }
+    if (-not $hash) { $hash = 'nogit' }
+    return $hash
+}
+
+function Set-BuildHash([string]$stageApp, [string]$hash) {
+    $staged = Join-Path $stageApp 'appinfo.json'
+    if (-not (Test-Path $staged)) { return $false }
+    $info = Get-Content $staged -Raw | ConvertFrom-Json
+    $info | Add-Member -NotePropertyName 'buildHash' -NotePropertyValue $hash -Force
+    $json = $info | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($staged, $json, (New-Object System.Text.UTF8Encoding($false)))
     return $true
 }
 
@@ -163,7 +152,6 @@ if ($info -match 'modelName|sdkVersion|boardType') {
     Warn "ares-device -i 未能读取信息（可能命令格式不同，跳过，交由安装步骤验证）: $($info.Trim())"
 }
 
-# 6. 打包（只打包应用运行所需文件，排除 .md/.ps1/.txt 等非应用文件）
 Say "`n[6/7] 打包应用 ..."
 $svcDir = Join-Path $ProjectDir 'services\com.woltv.wakeonlan.service'
 $dist   = Join-Path $ProjectDir 'dist'
@@ -177,13 +165,15 @@ foreach ($f in $appFiles) {
     $src = Join-Path $ProjectDir $f
     if (Test-Path $src) { Copy-Item -Path $src -Destination $stageApp -Recurse -Force }
 }
+$commitHash = Get-CommitHash
+if (Set-BuildHash $stageApp $commitHash) { Ok "已注入提交哈希: buildHash=$commitHash"; $summary += "OK hash $commitHash" }
+else { Warn "打包副本缺少 appinfo.json，跳过哈希注入"; $summary += 'WARN hash' }
 $pkgOut = & ares-package $stageApp $svcDir -o $dist 2>&1 | Out-String
 Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
 $ipk = Get-ChildItem -Path $dist -Filter '*.ipk' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($ipk) { Ok "打包完成: $($ipk.Name)"; $summary += 'OK package' }
 else { Fail "打包失败: $pkgOut"; $summary += 'FAIL package'; exit 1 }
 
-# 7. 安装
 Say "`n[7/7] 安装应用到电视 ..."
 $inst = & ares-install --device $Device $ipk.FullName 2>&1 | Out-String
 if ($inst -match 'Connection timed out|ERR!') {
@@ -192,7 +182,6 @@ if ($inst -match 'Connection timed out|ERR!') {
 if ($inst -match 'Success|Installed|succeeded|already installed|existing') { Ok "安装成功: com.woltv.wakeonlan"; $summary += 'OK install' }
 else { Fail "安装失败: $($inst.Trim())"; $summary += 'FAIL install'; exit 1 }
 
-# 启动
 if (-not $SkipLaunch) {
     Say "`n[额外] 启动应用 ..."
     $la = & ares-launch --device $Device com.woltv.wakeonlan 2>&1 | Out-String
