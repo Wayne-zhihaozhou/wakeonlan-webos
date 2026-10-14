@@ -9,16 +9,18 @@
     dist/、*.ipk              —— 打包产物
     node_modules/             —— 依赖
     passphrase.txt / *.local.ps1 —— 个人密钥/敏感文件（按 .gitignore 约定）
+    README.md                 —— 说明文档，不复制
     本脚本自身 copy-project.ps1 —— 避免复制出来的副本里再藏一个副本
+  行为：
+    复制之前【无条件】清空目标目录（含隐藏/只读项）中的所有内容，
+    保证目标目录是源目录的干净镜像。
   可选参数：
     -Dest <目录>   默认 C:\0_AI\1
-    -NoPrune       复制前不先清空目标目录（默认会清空，保证镜像一致）
  =====================================================================
 #>
 [CmdletBinding()]
 param(
-    [string]$Dest = 'C:\0_AI\1',
-    [switch]$NoPrune
+    [string]$Dest = 'C:\0_AI\1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +41,7 @@ $exclude = @(
     '*.local.ps1',
     '.gitignore',
     '*.png',
+    'README.md',             # 说明文档，不复制到目标目录
     'copy-project.ps1'       # 自身
 )
 
@@ -58,9 +61,27 @@ function Test-Excluded([string]$relPath) {
 
 # 准备目标目录
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-if (-not $NoPrune) {
-    Write-Host "清空目标目录..." -ForegroundColor Yellow
-    Get-ChildItem -Path $Dest -Force | Remove-Item -Recurse -Force
+
+# 复制之前先直接清空目标目录里的所有内容（文件 + 子文件夹，含隐藏/只读项）
+Write-Host "清空目标目录..." -ForegroundColor Yellow
+$old = @(Get-ChildItem -Path $Dest -Force)
+if ($old.Count -eq 0) {
+    Write-Host "  目标目录本来就是空的" -ForegroundColor DarkGray
+} else {
+    foreach ($item in $old) {
+        try {
+            # 只读属性会导致删除失败，先尝试重置（失败也不影响后续 -Force 删除）
+            try {
+                if ($item.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                    $item.Attributes = $item.Attributes -bxor [IO.FileAttributes]::ReadOnly
+                }
+            } catch { }
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force
+            Write-Host "  已删除: $($item.Name)" -ForegroundColor DarkGray
+        } catch {
+            Write-Host "  删除失败: $($item.FullName)  ->  $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
 }
 
 $files = Get-ChildItem -Path $src -Recurse -File -Force
