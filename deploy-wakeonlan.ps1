@@ -520,9 +520,3 @@ if (-not ($summary | Where-Object { $_ -like 'FAIL*' })) {
     Say ">>> 存在失败项，请把上面输出发给我。" -ForegroundColor Yellow
 }
 
-# === 正常结束也暂停 ===
-if (-not $NoPause) {
-    Write-Host ""
-    Write-Host "按回车键关闭窗口..." -ForegroundColor Yellow
-    Read-Host
-}
