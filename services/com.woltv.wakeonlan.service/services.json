@@ -30,6 +30,26 @@
                     "name": "scan",
                     "description": "Scan LAN and list discovered devices (ip + mac)",
                     "public": true
+                },
+                {
+                    "name": "registerPreparePowerOn",
+                    "description": "Receive TV prepare-power-on notifications",
+                    "public": true
+                },
+                {
+                    "name": "preparePowerOn",
+                    "description": "Receive TV prepare-power-on notifications",
+                    "public": true
+                },
+                {
+                    "name": "registerPrepareResume",
+                    "description": "Receive TV prepare-resume notifications",
+                    "public": true
+                },
+                {
+                    "name": "prepareResume",
+                    "description": "Receive TV prepare-resume notifications",
+                    "public": true
                 }
             ]
         }

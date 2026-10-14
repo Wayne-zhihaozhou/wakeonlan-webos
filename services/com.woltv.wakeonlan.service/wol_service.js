@@ -8,6 +8,8 @@ var SERVICE_NAME = 'com.woltv.wakeonlan.service';
 var DB_URI = 'luna://com.palm.db';
 var KIND = 'com.woltv.wakeonlan:1';
 var CONN_URI = 'luna://com.webos.service.connectionmanager';
+var TVPOWER_URI = 'luna://com.webos.service.tvpower/power';
+var ACTIVITY_URI = 'luna://com.palm.activitymanager';
 
 var FLAGS = {
     broadcast: true
@@ -20,9 +22,32 @@ var DEFAULT_CONFIG = {
 };
 
 var service = new Service(SERVICE_NAME);
-var lastSend = { at: 0, ok: false, error: '' };
+var lastSend = { at: 0, ok: false, error: '', reason: '' };
 
 var configCache = null;
+var startedAt = Date.now();
+var resident = { ok: false, at: 0, error: '', activityId: '' };
+
+var POWER_TRIGGERS = [
+    { method: 'registerPreparePowerOn', ack: 'responsePreparePowerOn', wake: true },
+    { method: 'registerPrepareResume', ack: 'responsePrepareResume', wake: true }
+];
+
+var power = {
+    eventCount: 0,
+    lastEvent: null,
+    events: [],
+    triggers: {}
+};
+
+function nowIso() {
+    return new Date().toISOString();
+}
+
+function rememberEvent(text) {
+    power.events.push(text);
+    if (power.events.length > 12) { power.events.shift(); }
+}
 
 function lunaCall(uri, method, parameters, cb, timeoutMs) {
     var called = false;
@@ -254,7 +279,7 @@ function buildMagicPacket(mac) {
     return packet;
 }
 
-var NET_CHECK_INTERVAL_MS = 5000;
+var NET_CHECK_INTERVAL_MS = 3000;
 var NET_CHECK_TIMEOUT_MS = 5 * 60 * 1000;
 
 function isConnectedPayload(res) {
@@ -346,41 +371,187 @@ function sendWOL(cfg, cb) {
     });
 }
 
-function recordSend(ok, error) {
-    lastSend = { at: Date.now(), ok: ok, error: error || '' };
+function recordSend(ok, error, reason) {
+    lastSend = { at: Date.now(), ok: ok, error: error || '', reason: reason || '' };
 }
 
-function sendMagicPacket(cfg, cb) {
+var BURST_COUNT = 3;
+var BURST_GAP_MS = 2500;
+var START_DELAY_MS = 1500;
+
+function sendMagicBurst(cfg, reason, cb) {
+    var attempts = 0;
+    var errors = [];
+    setTimeout(function () {
+        once();
+    }, START_DELAY_MS);
+
+    function once() {
+        sendWOLWhenNetworkReady(cfg, function (err) {
+            attempts++;
+            if (err) { errors.push(String(err.message || err)); }
+            console.log('magic packet attempt ' + attempts + '/' + BURST_COUNT + ' reason=' + reason + ' ok=' + !err + (err ? ' error=' + err.message : ''));
+            if (attempts >= BURST_COUNT) {
+                recordSend(errors.length === 0, errors.join('; '), reason);
+                rememberEvent('发送 ' + attempts + ' 次 ' + (errors.length === 0 ? '成功' : '失败'));
+                if (cb) { cb(errors.length === 0, errors); }
+            } else {
+                setTimeout(once, BURST_GAP_MS);
+            }
+        });
+    }
+}
+
+function sendMagicPacket(cfg, reason, cb) {
     if (!cfg) { cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG)); }
-    sendWOLWhenNetworkReady(cfg, function (err) {
-        recordSend(!err, err && err.message);
-        if (cb) { cb(err); }
+    var useBurst = reason === 'powerOn' || reason === 'resume' || reason === 'boot' || reason === 'manual';
+    if (!useBurst) {
+        sendWOLWhenNetworkReady(cfg, function (err) {
+            recordSend(!err, err && err.message, reason);
+            if (cb) { cb(err); }
+        });
+        return;
+    }
+    sendMagicBurst(cfg, reason, function (ok) {
+        if (cb) { cb(ok ? null : new Error('send failed')); }
     });
 }
 
+function ackPowerPrepare(ackMethod, triggerMethod) {
+    lunaCall(TVPOWER_URI, ackMethod, {
+        clientName: SERVICE_NAME,
+        returnValue: true
+    }, function (res) {
+        console.log('ack ' + ackMethod + ' for ' + triggerMethod + ': ' + JSON.stringify(res));
+    }, 3000);
+}
+
+function triggerWake(reason, detail) {
+    power.eventCount++;
+    power.lastEvent = { reason: reason, at: Date.now(), detail: detail || null };
+    rememberEvent(reason + ' @ ' + nowIso());
+    console.log('power trigger: ' + reason + ' detail=' + JSON.stringify(detail || null));
+    loadConfig(function (err, cfg) {
+        sendMagicPacket(cfg, reason, function () { });
+    });
+}
+
+function registerPowerTrigger(trigger) {
+    var state = power.triggers[trigger.method];
+    if (state && state.subscribed) { return; }
+    if (!state) {
+        state = { subscribed: false, at: 0, events: 0, error: '', ack: trigger.ack, wake: trigger.wake };
+        power.triggers[trigger.method] = state;
+    }
+    state.at = Date.now();
+    var subscription;
+    try {
+        subscription = service.subscribe(TVPOWER_URI + '/' + trigger.method, {
+            clientName: SERVICE_NAME,
+            subscribe: true
+        });
+    } catch (e) {
+        state.error = String(e && e.message || e);
+        console.log('subscribe ' + trigger.method + ' failed: ' + state.error);
+        return;
+    }
+    subscription.on('response', function (message) {
+        var payload = (message && message.payload) || {};
+        if (payload.subscribed === true && !state.subscribed) {
+            state.subscribed = true;
+            state.error = '';
+            console.log('registered for ' + trigger.method);
+            return;
+        }
+        state.events++;
+        console.log('power event ' + trigger.method + ': ' + JSON.stringify(payload));
+        if (!trigger.wake) { return; }
+        ackPowerPrepare(trigger.ack, trigger.method);
+        rememberEvent('收到 ' + trigger.method);
+        triggerWake(trigger.method === 'registerPrepareResume' ? 'resume' : 'powerOn', payload);
+    });
+    subscription.on('cancel', function () {
+        state.subscribed = false;
+        console.log('subscription cancelled: ' + trigger.method);
+        setTimeout(function () { registerPowerTrigger(trigger); }, 5000);
+    });
+}
+
+function registerPowerTriggers() {
+    for (var i = 0; i < POWER_TRIGGERS.length; i++) {
+        registerPowerTrigger(POWER_TRIGGERS[i]);
+    }
+}
+
+function registerIncomingHooks() {
+    var hooks = [
+        { method: 'registerPreparePowerOn', ack: 'responsePreparePowerOn', wake: true },
+        { method: 'preparePowerOn', ack: 'responsePreparePowerOn', wake: true },
+        { method: 'registerPrepareResume', ack: 'responsePrepareResume', wake: true },
+        { method: 'prepareResume', ack: 'responsePrepareResume', wake: true }
+    ];
+    hooks.forEach(function (hook) {
+        service.register(hook.method, function (message) {
+            var payload = (message && message.payload) || {};
+            console.log('incoming ' + hook.method + ': ' + JSON.stringify(payload));
+            message.respond({ returnValue: true, received: hook.method });
+            if (hook.wake) {
+                ackPowerPrepare(hook.ack, hook.method);
+                triggerWake(hook.method.indexOf('Resume') >= 0 ? 'resume' : 'powerOn', payload);
+            }
+        });
+    });
+}
+
+var residentActivity = null;
+
+function keepResident() {
+    if (residentActivity) { return; }
+    try {
+        residentActivity = service.activityManager.create('wol-resident', function (activity) {
+            resident.ok = true;
+            resident.at = Date.now();
+            resident.error = '';
+            resident.activityId = (activity && activity.activityId) || '';
+            console.log('resident activity created: ' + JSON.stringify(activity));
+        });
+    } catch (e) {
+        resident.ok = false;
+        resident.error = String(e && e.message || e);
+        console.log('resident activity failed: ' + resident.error);
+    }
+}
+
 function ensurePersistActivity() {
-    service.call('luna://com.palm.activitymanager/create', {
+    lunaCall(ACTIVITY_URI, 'create', {
         activity: {
-            name: 'com.woltv.wakeonlan.service.persist',
+            name: SERVICE_NAME + '.persist',
             description: 'Persistent watchdog to relaunch WOL service after cold boot',
             type: { persist: true, background: true },
             callback: {
-                method: 'luna://com.woltv.wakeonlan.service/wake',
-                params: {}
+                method: 'luna://' + SERVICE_NAME + '/wake',
+                params: { reason: 'boot' }
             }
         },
         start: true,
         replace: true,
         subscribe: true
-    }, function (message) {
-        var p = message && message.payload;
-        if (!p || p.returnValue === false) {
-            console.log('persist activity create failed: ' + ((p && p.errorText) || ''));
+    }, function (res) {
+        var p = res || {};
+        if (p.returnValue === false) {
+            console.log('persist activity create failed: ' + (p.errorText || ''));
         }
-    });
+    }, 8000);
 }
 
+registerIncomingHooks();
+keepResident();
 ensurePersistActivity();
+registerPowerTriggers();
+
+setInterval(function () {
+    registerPowerTriggers();
+}, 60 * 1000);
 
 service.register('wake', function (message) {
     var p = message.payload || {};
@@ -397,7 +568,7 @@ service.register('wake', function (message) {
             }
         }
 
-        sendMagicPacket(cfg, function (sendErr) {
+        sendMagicPacket(cfg, p.reason || 'boot', function (sendErr) {
             respond(sendErr);
         });
     });
@@ -435,7 +606,11 @@ service.register('setConfig', function (message) {
 service.register('getStatus', function (message) {
     message.respond({
         returnValue: true,
-        lastSend: lastSend
+        lastSend: lastSend,
+        startedAt: startedAt,
+        uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+        resident: resident,
+        power: power
     });
 });
 

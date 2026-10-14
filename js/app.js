@@ -13,7 +13,8 @@
         save: document.getElementById('btnSave'),
         exit: document.getElementById('btnExit'),
         wake: document.getElementById('btnWake'),
-        status: document.getElementById('status')
+        status: document.getElementById('status'),
+        powerDiag: document.getElementById('powerDiag')
     };
 
     var devicesCache = [];
@@ -308,6 +309,43 @@
         } catch (e) { }
     }
 
+    function fmtClock(ms) {
+        if (!ms) { return '从未'; }
+        var d = new Date(ms);
+        function pad(n) { return (n < 10 ? '0' : '') + n; }
+        return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }
+
+    function loadPowerDiag() {
+        if (!els.powerDiag) { return; }
+        callService('getStatus', {}, 6000)
+            .then(function (res) {
+                var p = res.power || {};
+                var triggers = p.triggers || {};
+                var names = [];
+                for (var k in triggers) {
+                    if (Object.prototype.hasOwnProperty.call(triggers, k)) {
+                        names.push(k.replace('registerPrepare', '') + (triggers[k].subscribed ? '✓' : '✗'));
+                    }
+                }
+                var lines = [];
+                lines.push('后台服务常驻：' + ((res.resident && res.resident.ok) ? '是' : '否'));
+                lines.push('开机触发注册：' + (names.length ? names.join(' / ') : '无'));
+                lines.push('电源事件：' + (p.eventCount || 0) + ' 次' +
+                    (p.lastEvent ? '，最近 ' + p.lastEvent.reason + ' ' + fmtClock(p.lastEvent.at) : ''));
+                var ls = res.lastSend || {};
+                lines.push('最近发送：' + fmtClock(ls.at) +
+                    (ls.at ? (ls.ok ? ' 成功' : ' 失败') + (ls.reason ? ' (' + ls.reason + ')' : '') : ''));
+                if (p.events && p.events.length) {
+                    lines.push('记录：' + p.events.slice(-3).join('；'));
+                }
+                els.powerDiag.textContent = lines.join('　·　');
+            })
+            .catch(function () {
+                els.powerDiag.textContent = '后台服务无响应';
+            });
+    }
+
     function loadBuildInfo() {
         var el = document.getElementById('build');
         if (!el) { return; }
@@ -429,6 +467,8 @@
 
     loadConfig();
     loadBuildInfo();
+    loadPowerDiag();
+    window.setInterval(loadPowerDiag, 5000);
     window.setTimeout(function () { focusAt(0); }, 300);
 
     callService('getStatus', {}, 6000)
