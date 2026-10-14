@@ -426,14 +426,37 @@ function ackPowerPrepare(ackMethod, triggerMethod) {
     }, 3000);
 }
 
+var lastTriggerAt = 0;
+var HEARTBEAT_INTERVAL_MS = 10000;
+var HEARTBEAT_GAP_MS = 60000;
+var heartbeat = { last: Date.now(), gapCount: 0, lastGapMs: 0 };
+
 function triggerWake(reason, detail) {
+    var now = Date.now();
+    if (now - lastTriggerAt < 30000) {
+        console.log('power trigger ignored (duplicate): ' + reason);
+        return;
+    }
+    lastTriggerAt = now;
     power.eventCount++;
-    power.lastEvent = { reason: reason, at: Date.now(), detail: detail || null };
+    power.lastEvent = { reason: reason, at: now, detail: detail || null };
     rememberEvent(reason + ' @ ' + nowIso());
     console.log('power trigger: ' + reason + ' detail=' + JSON.stringify(detail || null));
     loadConfig(function (err, cfg) {
         sendMagicPacket(cfg, reason, function () { });
     });
+}
+
+function watchResumeGap() {
+    var now = Date.now();
+    var gap = now - heartbeat.last;
+    heartbeat.last = now;
+    if (gap < HEARTBEAT_GAP_MS) { return; }
+    heartbeat.gapCount++;
+    heartbeat.lastGapMs = gap;
+    console.log('resume detected by timer gap: ' + gap + 'ms');
+    rememberEvent('时钟跳变 ' + Math.round(gap / 1000) + ' 秒，判定为电视恢复');
+    triggerWake('resume-gap', { gapMs: gap });
 }
 
 function registerPowerTrigger(trigger) {
@@ -553,6 +576,8 @@ setInterval(function () {
     registerPowerTriggers();
 }, 60 * 1000);
 
+setInterval(watchResumeGap, HEARTBEAT_INTERVAL_MS);
+
 service.register('wake', function (message) {
     var p = message.payload || {};
     loadConfig(function (err, cfg) {
@@ -610,6 +635,7 @@ service.register('getStatus', function (message) {
         startedAt: startedAt,
         uptimeSec: Math.round((Date.now() - startedAt) / 1000),
         resident: resident,
+        heartbeat: heartbeat,
         power: power
     });
 });
