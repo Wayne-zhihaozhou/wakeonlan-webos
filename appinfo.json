@@ -1,6 +1,6 @@
 {
     "id": "com.woltv.wakeonlan",
-    "version": "0.0.6",
+    "version": "0.0.7",
     "vendor": "WOL TV",
     "type": "web",
     "main": "index.html",
